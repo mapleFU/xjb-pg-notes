@@ -2673,6 +2673,7 @@ eval_const_expressions_mutator(Node *node,
 							bool		haveNull = false;
 							bool		forceTrue = false;
 
+              // 处理表达式, 如果是 or TRUE, 那么肯定 true.
 							newargs = simplify_or_arguments(expr->args,
 															context,
 															&haveNull,

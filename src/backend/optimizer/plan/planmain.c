@@ -36,6 +36,8 @@
  *	  Generate a path (that is, a simplified plan) for a basic query,
  *	  which may involve joins but not any fancier features.
  *
+ * 从 Query 生成 Plan.
+ *
  * Since query_planner does not handle the toplevel processing (grouping,
  * sorting, etc) it cannot select the best path by itself.  Instead, it
  * returns the RelOptInfo for the top level of joining, and the caller
@@ -55,7 +57,7 @@ RelOptInfo *
 query_planner(PlannerInfo *root,
 			  query_pathkeys_callback qp_callback, void *qp_extra)
 {
-	Query	   *parse = root->parse;
+	Query	   *parse = root->parse; // 返回需要 parse 的内容.
 	List	   *joinlist;
 	RelOptInfo *final_rel;
 
@@ -93,7 +95,7 @@ query_planner(PlannerInfo *root,
 	if (list_length(parse->jointree->fromlist) == 1)
 	{
 		Node	   *jtnode = (Node *) linitial(parse->jointree->fromlist);
-
+    // 如果是个单表访问, 那么绕过后面的检查, 直接构建一个 simple_rel 作为单表访问.
 		if (IsA(jtnode, RangeTblRef))
 		{
 			int			varno = ((RangeTblRef *) jtnode)->rtindex;
@@ -156,7 +158,7 @@ query_planner(PlannerInfo *root,
 
 	/*
 	 * Construct RelOptInfo nodes for all base relations used in the query.
-	 * Appendrel member relations ("other rels") will be added later.
+	 * Appendrel member relations ("other rels") will be added later. (对基本的方法加上 RelOptInfo).
 	 *
 	 * Note: the reason we find the baserels by searching the jointree, rather
 	 * than scanning the rangetable, is that the rangetable may contain RTEs
@@ -181,6 +183,7 @@ query_planner(PlannerInfo *root,
 
 	find_lateral_references(root);
 
+  // 销毁 jointree
 	joinlist = deconstruct_jointree(root);
 
 	/*

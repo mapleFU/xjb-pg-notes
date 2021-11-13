@@ -1276,6 +1276,7 @@ convert_ANY_sublink_to_join(PlannerInfo *root, SubLink *sublink,
 {
 	JoinExpr   *result;
 	Query	   *parse = root->parse;
+  // quals 推成 sublink, subselect 表示它的 Query 格式.
 	Query	   *subselect = (Query *) sublink->subselect;
 	Relids		upper_varnos;
 	int			rtindex;
@@ -1291,6 +1292,8 @@ convert_ANY_sublink_to_join(PlannerInfo *root, SubLink *sublink,
 	/*
 	 * The sub-select must not refer to any Vars of the parent query. (Vars of
 	 * higher levels should be okay, though.)
+	 *
+	 * 如果 sublink 引用了父级的 Var, 那么不执行(我感觉 apply 那套可以啊)
 	 */
 	if (contain_vars_of_level((Node *) subselect, 1))
 		return NULL;
@@ -1299,6 +1302,9 @@ convert_ANY_sublink_to_join(PlannerInfo *root, SubLink *sublink,
 	 * The test expression must contain some Vars of the parent query, else
 	 * it's not gonna be a join.  (Note that it won't have Vars referring to
 	 * the subquery, rather Params.)
+	 *
+	 * 如果这里没有引用上一层的 Column, 比如:
+	 * 1 > ANY (SELECT ... ), 不可以
 	 */
 	upper_varnos = pull_varnos(root, sublink->testexpr);
 	if (bms_is_empty(upper_varnos))
@@ -1306,6 +1312,8 @@ convert_ANY_sublink_to_join(PlannerInfo *root, SubLink *sublink,
 
 	/*
 	 * However, it can't refer to anything outside available_rels.
+	 *
+	 * 我没看懂, 这个地方是语句不合法吗?
 	 */
 	if (!bms_is_subset(upper_varnos, available_rels))
 		return NULL;
@@ -1315,6 +1323,8 @@ convert_ANY_sublink_to_join(PlannerInfo *root, SubLink *sublink,
 	 */
 	if (contain_volatile_functions(sublink->testexpr))
 		return NULL;
+
+  // Hack: 感觉这里开始 Parse 了
 
 	/* Create a dummy ParseState for addRangeTableEntryForSubquery */
 	pstate = make_parsestate(NULL);
@@ -1347,15 +1357,19 @@ convert_ANY_sublink_to_join(PlannerInfo *root, SubLink *sublink,
 	 */
 	subquery_vars = generate_subquery_vars(root,
 										   subselect->targetList,
-										   rtindex);
+										   /* 新生成的表的 index */ rtindex);
 
 	/*
 	 * Build the new join's qual expression, replacing Params with these Vars.
+	 *
+	 * 转成新的 quals. Params 代替成 Vars. testexpr 原本只是一个 ast 的结构
 	 */
 	quals = convert_testexpr(root, sublink->testexpr, subquery_vars);
 
 	/*
 	 * And finally, build the JoinExpr node.
+	 *
+	 * 转成一个 Join
 	 */
 	result = makeNode(JoinExpr);
 	result->jointype = JOIN_SEMI;

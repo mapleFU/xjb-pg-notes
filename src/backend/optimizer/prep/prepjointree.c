@@ -145,6 +145,8 @@ static Node *find_jointree_node_for_rel(Node *jtnode, int relid);
  *
  * Unlike most other functions in this file, this function doesn't recurse;
  * we rely on other processing to invoke it on sub-queries at suitable times.
+ *
+ * 这个应该就是一个 corner case bypass, 创建一个 rtable 防呆防傻.
  */
 void
 replace_empty_jointree(Query *parse)
@@ -193,11 +195,18 @@ replace_empty_jointree(Query *parse)
  * nonnullable-side variables then it would have to be evaluated as part
  * of the outer join, which makes things way too complicated.
  *
+ * 尝试把简单的 ANY 提升成 subjoin. 但是这里只能提取无关的子查询.
+ * 这里拿不到表的信息, 所以做的比较草台.
+ *
  * Under similar conditions, EXISTS and NOT EXISTS clauses can be handled
  * by pulling up the sub-SELECT and creating a semijoin or anti-semijoin.
  *
+ * EXIST 可以被推诚 semijoin.
+ *
  * This routine searches for such clauses and does the necessary parsetree
  * transformations if any are found.
+ *
+ * 在 preprocess 之前运行.
  *
  * This routine has to run before preprocess_expression(), so the quals
  * clauses are not yet reduced to implicit-AND format, and are not guaranteed
@@ -207,8 +216,8 @@ replace_empty_jointree(Query *parse)
 void
 pull_up_sublinks(PlannerInfo *root)
 {
-	Node	   *jtnode;
-	Relids		relids;
+	Node	   *jtnode; // 最终的 JoinNodes
+	Relids		relids; // 依赖的参数, 用于判断 subLink 没有依赖外部.
 
 	/* Begin recursion through the jointree */
 	jtnode = pull_up_sublinks_jointree_recurse(root,
@@ -218,6 +227,8 @@ pull_up_sublinks(PlannerInfo *root)
 	/*
 	 * root->parse->jointree must always be a FromExpr, so insert a dummy one
 	 * if we got a bare RangeTblRef or JoinExpr out of the recursion.
+	 *
+	 * 递归的最后处理 join_tree, 推到 jt node 上.
 	 */
 	if (IsA(jtnode, FromExpr))
 		root->parse->jointree = (FromExpr *) jtnode;
@@ -230,6 +241,8 @@ pull_up_sublinks(PlannerInfo *root)
  *
  * In addition to returning the possibly-modified jointree node, we return
  * a relids set of the contained rels into *relids.
+ *
+ * 返回 jtnode.
  */
 static Node *
 pull_up_sublinks_jointree_recurse(PlannerInfo *root, Node *jtnode,
@@ -241,6 +254,8 @@ pull_up_sublinks_jointree_recurse(PlannerInfo *root, Node *jtnode,
 	}
 	else if (IsA(jtnode, RangeTblRef))
 	{
+    // 如果是 RangeTblRef, 可以简单当成遍历结束了, 这里需要吧 rtindex(自己绑定的 RangeTblEntry 位置) 给报出来.
+
 		int			varno = ((RangeTblRef *) jtnode)->rtindex;
 
 		*relids = bms_make_singleton(varno);
@@ -248,9 +263,10 @@ pull_up_sublinks_jointree_recurse(PlannerInfo *root, Node *jtnode,
 	}
 	else if (IsA(jtnode, FromExpr))
 	{
+    // from 表示自然连接, quals 带了条件.
 		FromExpr   *f = (FromExpr *) jtnode;
-		List	   *newfromlist = NIL;
-		Relids		frelids = NULL;
+		List	   *newfromlist = NIL; // 重组的 from
+		Relids		frelids = NULL; // 本层的 Relids
 		FromExpr   *newf;
 		Node	   *jtlink;
 		ListCell   *l;
@@ -260,7 +276,7 @@ pull_up_sublinks_jointree_recurse(PlannerInfo *root, Node *jtnode,
 		{
 			Node	   *newchild;
 			Relids		childrelids;
-
+      // 对子节点 pull_up
 			newchild = pull_up_sublinks_jointree_recurse(root,
 														 lfirst(l),
 														 &childrelids);
@@ -270,8 +286,9 @@ pull_up_sublinks_jointree_recurse(PlannerInfo *root, Node *jtnode,
 		/* Build the replacement FromExpr; no quals yet */
 		newf = makeFromExpr(newfromlist, NULL);
 		/* Set up a link representing the rebuilt jointree */
-		jtlink = (Node *) newf;
+		jtlink = (Node *) newf; // 新的 JoinTree(FromList).
 		/* Now process qual --- all children are available for use */
+    // 处理 quals
 		newf->quals = pull_up_sublinks_qual_recurse(root, f->quals,
 													&jtlink, frelids,
 													NULL, NULL);
@@ -395,12 +412,13 @@ pull_up_sublinks_qual_recurse(PlannerInfo *root, Node *node,
 	if (IsA(node, SubLink))
 	{
 		SubLink    *sublink = (SubLink *) node;
-		JoinExpr   *j;
+		JoinExpr   *j; // 如果执行成功, sublink 会转成这个.
 		Relids		child_rels;
 
 		/* Is it a convertible ANY or EXISTS clause? */
 		if (sublink->subLinkType == ANY_SUBLINK)
 		{
+      // 把子连接转成 Join, 然后给 root 加上对应的表.
 			if ((j = convert_ANY_sublink_to_join(root, sublink,
 												 available_rels1)) != NULL)
 			{

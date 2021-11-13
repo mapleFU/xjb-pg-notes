@@ -666,6 +666,8 @@ typedef struct BoolExpr
  * output columns of the subselect.  And subselect is transformed to a Query.
  * This is the representation seen in saved rules and in the rewriter.
  *
+ * testexpr 原本只是一个 ast 的结构
+ *
  * In EXISTS, EXPR, MULTIEXPR, and ARRAY SubLinks, testexpr and operName
  * are unused and are always null.
  *
@@ -696,6 +698,7 @@ typedef struct SubLink
 	Expr		xpr;
 	SubLinkType subLinkType;	/* see above */
 	int			subLinkId;		/* ID (1..n); 0 if not MULTIEXPR */
+  // left op right(project)
 	Node	   *testexpr;		/* outer-query test for ALL/ANY/ROWCOMPARE */
 	List	   *operName;		/* originally specified operator name */
 	Node	   *subselect;		/* subselect as Query* or raw parsetree */
@@ -1503,7 +1506,7 @@ typedef struct TargetEntry
 typedef struct RangeTblRef
 {
 	NodeTag		type;
-	int			rtindex;
+	int			rtindex; // 依赖的 table 的 index
 } RangeTblRef;
 
 /*----------
@@ -1561,6 +1564,7 @@ typedef struct FromExpr
 {
 	NodeTag		type;
 	List	   *fromlist;		/* List of join subtrees */
+  // quals 可能是一个 subLink
 	Node	   *quals;			/* qualifiers on join, if any */
 } FromExpr;
 

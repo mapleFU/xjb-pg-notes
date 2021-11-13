@@ -178,6 +178,8 @@ add_other_rels_to_query(PlannerInfo *root)
  *
  * We mark such vars as needed by "relation 0" to ensure that they will
  * propagate up through all join plan steps.
+ *
+ * 把结果构建到 process_list 上.
  */
 void
 build_base_rel_tlists(PlannerInfo *root, List *final_tlist)
@@ -658,6 +660,8 @@ create_lateral_join_info(PlannerInfo *root)
  *****************************************************************************/
 
 /*
+ * 在初始化完之后, 处理 restrictinfo 和 joininfo.
+ *
  * deconstruct_jointree
  *	  Recursively scan the query's join tree for WHERE and JOIN/ON qual
  *	  clauses, and add these to the appropriate restrictinfo and joininfo

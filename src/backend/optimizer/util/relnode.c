@@ -87,6 +87,7 @@ setup_simple_rel_arrays(PlannerInfo *root)
 	ListCell   *lc;
 
 	/* Arrays are accessed using RT indexes (1..N) */
+  // 包含的 rtable 的大小.
 	size = list_length(root->parse->rtable) + 1;
 	root->simple_rel_array_size = size;
 
@@ -101,6 +102,7 @@ setup_simple_rel_arrays(PlannerInfo *root)
 	root->simple_rte_array = (RangeTblEntry **)
 		palloc0(size * sizeof(RangeTblEntry *));
 	rti = 1;
+  // 拷贝 rtables.
 	foreach(lc, root->parse->rtable)
 	{
 		RangeTblEntry *rte = (RangeTblEntry *) lfirst(lc);

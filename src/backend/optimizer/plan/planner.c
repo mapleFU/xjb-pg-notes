@@ -284,7 +284,7 @@ standard_planner(Query *parse, const char *query_string, int cursorOptions,
 {
 	PlannedStmt *result;
 	PlannerGlobal *glob;
-	double		tuple_fraction;
+	double		tuple_fraction; // 和 Limit 有关.
 	PlannerInfo *root;
 	RelOptInfo *final_rel;
 	Path	   *best_path;
@@ -645,6 +645,8 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 	/*
 	 * If there is a WITH list, process each WITH query and either convert it
 	 * to RTE_SUBQUERY RTE(s) or build an initplan SubPlan structure for it.
+	 *
+	 * 这里不会给 CTE 做特殊的处, 直接 SS_ 最后处理
 	 */
 	if (parse->cteList)
 		SS_process_ctes(root);
@@ -652,6 +654,8 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 	/*
 	 * If the FROM clause is empty, replace it with a dummy RTE_RESULT RTE, so
 	 * that we don't need so many special cases to deal with that situation.
+	 *
+	 * 防呆防傻
 	 */
 	replace_empty_jointree(parse);
 
@@ -660,6 +664,8 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 	 * to transform them into joins.  Note that this step does not descend
 	 * into subqueries; if we pull up any subqueries below, their SubLinks are
 	 * processed just before pulling them up.
+	 *
+	 * ANY/EXIST sublink 提升, 尝试提升成 subquery.
 	 */
 	if (parse->hasSubLinks)
 		pull_up_sublinks(root);
@@ -675,6 +681,8 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 	/*
 	 * Check to see if any subqueries in the jointree can be merged into this
 	 * query.
+	 *
+	 * 子查询提升
 	 */
 	pull_up_subqueries(root);
 
@@ -683,6 +691,8 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 	 * do this now because it requires applying pull_up_subqueries to the leaf
 	 * queries of the UNION ALL, which weren't touched above because they
 	 * weren't referenced by the jointree (they will be after we do this).
+	 *
+	 * union all 优化.
 	 */
 	if (parse->setOperations)
 		flatten_simple_union_all(root);
@@ -696,6 +706,8 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 	 * inherited or partitioned rels can cause RTEs for their child tables to
 	 * get added later; but those must all be RTE_RELATION entries, so they
 	 * don't invalidate the conclusions drawn here.)
+	 *
+	 * 处理 joins 相关的内容.
 	 */
 	root->hasJoinRTEs = false;
 	root->hasLateralRTEs = false;
@@ -776,6 +788,10 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 	 * an empty qual list ... but "HAVING TRUE" is not a semantic no-op.
 	 */
 	root->hasHavingQual = (parse->havingQual != NULL);
+
+  /*
+   * 调用所有 preprocess_expression.
+   */
 
 	/*
 	 * Do expression preprocessing on targetlist and quals, as well as other
@@ -970,6 +986,8 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 	 * implicitly-ANDed-list form at this point, even though they are declared
 	 * as Node *.
 	 */
+
+  // 裁剪 having.
 	newHaving = NIL;
 	foreach(l, (List *) parse->havingQual)
 	{
@@ -1074,6 +1092,8 @@ preprocess_expression(PlannerInfo *root, Node *expr, int kind)
 	 * out from join aliases would not get processed.  But we can skip this in
 	 * non-lateral RTE functions, VALUES lists, and TABLESAMPLE clauses, since
 	 * they can't contain any Vars of the current query level.
+	 *
+	 * 把 Join 依赖的给 flatten 了.
 	 */
 	if (root->hasJoinRTEs &&
 		!(kind == EXPRKIND_RTFUNC ||
