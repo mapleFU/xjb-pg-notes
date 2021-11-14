@@ -10,6 +10,7 @@
  * IDENTIFICATION
  *	  src/backend/optimizer/path/clausesel.c
  *
+ * 对 Clause 的实现, 包括 Range 等, 用于计算 Seletivity.
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"

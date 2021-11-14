@@ -9,6 +9,8 @@
  *
  * src/include/nodes/pathnodes.h
  *
+ * Postgres 的等价类.
+ *
  *-------------------------------------------------------------------------
  */
 #ifndef PATHNODES_H
@@ -183,7 +185,7 @@ struct PlannerInfo
 	 * does not correspond to a base relation, such as a join RTE or an
 	 * unreferenced view RTE; or if the RelOptInfo hasn't been made yet.
 	 *
-	 * 单表访问方法.
+	 * 单表访问方法的集合.
 	 */
 	struct RelOptInfo **simple_rel_array;	/* All 1-rel RelOptInfos */
 	int			simple_rel_array_size;	/* allocated size of array */
@@ -1931,6 +1933,11 @@ typedef struct LimitPath
  * tuples, without having to evaluate the rest.  The RestrictInfo node itself
  * stores data used by the optimizer while choosing the best query plan.
  *
+ * 每个 AND 子句会有一个对应条件:
+ *
+ * * 如果 restriction clause 只会 ref 一个基本的关系, 那么它会存储在 base rel(RelOptInfo) 的 baserestrictinfo 上.
+ * * 如果它涉及不止一个关系, 那么会在 JoinInfo 的 list 中,
+ *
  * If a restriction clause references a single base relation, it will appear
  * in the baserestrictinfo list of the RelOptInfo for that base rel.
  *
@@ -2198,7 +2205,11 @@ typedef struct PlaceHolderVar
 } PlaceHolderVar;
 
 /*
+ * 关于非 natural join 的限制.
+ *
  * "Special join" info.
+ *
+ * 把 outer join 用 SpecialJoinInfo 记录, 并记录在 `join_info_list` 中.
  *
  * One-sided outer joins constrain the order of joining partially but not
  * completely.  We flatten such joins into the planner's top-level list of
@@ -2206,12 +2217,20 @@ typedef struct PlaceHolderVar
  * SpecialJoinInfo struct.  These structs are kept in the PlannerInfo node's
  * join_info_list.
  *
+ * Semijoin 和 antijoin 的子句也要受影响.
+ *
  * Similarly, semijoins and antijoins created by flattening IN (subselect)
  * and EXISTS(subselect) clauses create partial constraints on join order.
  * These are likewise recorded in SpecialJoinInfo structs.
  *
+ * FULL JOIN 也被算进来了，它不能被 reorder(在 selinger 里面甚至会被最后处理), 但是
+ * 这能够简化 api.
+ *
  * We make SpecialJoinInfos for FULL JOINs even though there is no flexibility
  * of planning for them, because this simplifies make_join_rel()'s API.
+ *
+ * lhs_strict 和 rhs_strict 是限制左右的内容.
+ * min_*hand 是说, 需要形成 Join, 左右至少要有哪些表. 因为它本身不可以 reorder, 但左右可以
  *
  * min_lefthand and min_righthand are the sets of base relids that must be
  * available on each side when performing the special join.  lhs_strict is
@@ -2220,12 +2239,19 @@ typedef struct PlaceHolderVar
  * outer joins even if it appears in their RHS).  We don't bother to set
  * lhs_strict for FULL JOINs, however.
  *
+ * 对于 special, min_*hand 不能都为空.
+ *
  * It is not valid for either min_lefthand or min_righthand to be empty sets;
  * if they were, this would break the logic that enforces join order.
+ *
+ * syn_*hand 是语法上依赖了哪些表, 比方说是一个最下头的 Special Join, 可以帮上头算.
  *
  * syn_lefthand and syn_righthand are the sets of base relids that are
  * syntactically below this special join.  (These are needed to help compute
  * min_lefthand and min_righthand for higher joins.)
+ *
+ * SELECT * FROM student LEFT JOIN ( SELECT course.cno FROM score LEFT Join course ON True) sc ON sc.eno IS NULL.
+ * 这里 IS NULL 是可以下推的.
  *
  * delay_upper_joins is set true if we detect a pushed-down clause that has
  * to be evaluated after this join is formed (because it references the RHS).

@@ -535,6 +535,8 @@ typedef struct NamedArgExpr
  * Note that opfuncid is not necessarily filled in immediately on creation
  * of the node.  The planner makes sure it is valid before passing the node
  * tree to the executor, but during parsing/planning opfuncid can be 0.
+ *
+ * 约束条件
  */
 typedef struct OpExpr
 {

@@ -2953,6 +2953,8 @@ make_rel_from_joinlist(PlannerInfo *root, List *joinlist)
 }
 
 /*
+ * 搜索排序
+ *
  * standard_join_search
  *	  Find possible joinpaths for a query by successively finding ways
  *	  to join component relations into join relations.

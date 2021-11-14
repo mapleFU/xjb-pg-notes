@@ -660,7 +660,7 @@ create_lateral_join_info(PlannerInfo *root)
  *****************************************************************************/
 
 /*
- * 在初始化完之后, 处理 restrictinfo 和 joininfo.
+ * 在初始化完之后, 处理 restrictinfo 和 joininfo. 这里 RelOptInfo 里面已经挂了
  *
  * deconstruct_jointree
  *	  Recursively scan the query's join tree for WHERE and JOIN/ON qual
@@ -691,8 +691,11 @@ List *
 deconstruct_jointree(PlannerInfo *root)
 {
 	List	   *result;
+  // 出现的所有 Rel ids 集合.
 	Relids		qualscope;
+  // inner join 的 Rel ids
 	Relids		inner_join_rels;
+  // Lateral 查询相关.
 	List	   *postponed_qual_list = NIL;
 
 	/* Start recursion at top of jointree */
@@ -719,7 +722,7 @@ deconstruct_jointree(PlannerInfo *root)
  * Inputs:
  *	jtnode is the jointree node to examine
  *	below_outer_join is true if this node is within the nullable side of a
- *		higher-level outer join
+ *		higher-level outer join (出现了 outer join).
  * Outputs:
  *	*qualscope gets the set of base Relids syntactically included in this
  *		jointree node (do not modify or free this, as it may also be pointed
@@ -760,6 +763,7 @@ deconstruct_recurse(PlannerInfo *root, Node *jtnode, bool below_outer_join,
 										   below_outer_join);
 		/* A single baserel does not create an inner join */
 		*inner_join_rels = NULL;
+    // single table
 		joinlist = list_make1(jtnode);
 	}
 	else if (IsA(jtnode, FromExpr))
@@ -779,17 +783,21 @@ deconstruct_recurse(PlannerInfo *root, Node *jtnode, bool below_outer_join,
 		*inner_join_rels = NULL;
 		joinlist = NIL;
 		remaining = list_length(f->fromlist);
+
+    // 对需要 Join 的每张表
 		foreach(l, f->fromlist)
 		{
 			Relids		sub_qualscope;
 			List	   *sub_joinlist;
 			int			sub_members;
 
+      // 递归处理
 			sub_joinlist = deconstruct_recurse(root, lfirst(l),
 											   below_outer_join,
 											   &sub_qualscope,
 											   inner_join_rels,
 											   &child_postponed_quals);
+      // qualscope 添加子节点.
 			*qualscope = bms_add_members(*qualscope, sub_qualscope);
 			sub_members = list_length(sub_joinlist);
 			remaining--;
@@ -806,6 +814,9 @@ deconstruct_recurse(PlannerInfo *root, Node *jtnode, bool below_outer_join,
 		 * there was exactly one element, we should (and already did) report
 		 * whatever its inner_join_rels were.  If there were no elements (is
 		 * that still possible?) the initialization before the loop fixed it.
+		 *
+		 * 底下表不止一张的时候, 可能几边都没有给 Inner_join_rels 值, 所以要手动给它.
+		 * 否则就是个 null.
 		 */
 		if (list_length(f->fromlist) > 1)
 			*inner_join_rels = *qualscope;
@@ -816,6 +827,7 @@ deconstruct_recurse(PlannerInfo *root, Node *jtnode, bool below_outer_join,
 		 */
 		foreach(l, child_postponed_quals)
 		{
+      // 延迟: 执行或者继续延迟.
 			PostponedQual *pq = (PostponedQual *) lfirst(l);
 
 			if (bms_is_subset(pq->relids, *qualscope))
@@ -830,6 +842,8 @@ deconstruct_recurse(PlannerInfo *root, Node *jtnode, bool below_outer_join,
 
 		/*
 		 * Now process the top-level quals.
+		 *
+		 * 这里是下推 quals 的地方.
 		 */
 		foreach(l, (List *) f->quals)
 		{
@@ -870,10 +884,14 @@ deconstruct_recurse(PlannerInfo *root, Node *jtnode, bool below_outer_join,
 		 * will prevent quals above us in the join tree that use those rels
 		 * from being pushed down below this level.  (It's okay for upper
 		 * quals to be pushed down to the outer side, however.)
+		 *
+		 * 处理 JOIN 类型
 		 */
 		switch (j->jointype)
 		{
 			case JOIN_INNER:
+        // 这个类似只有两张表情况的 FROM_LIST
+
 				leftjoinlist = deconstruct_recurse(root, j->larg,
 												   below_outer_join,
 												   &leftids, &left_inners,
@@ -1605,6 +1623,8 @@ compute_semijoin_info(PlannerInfo *root, SpecialJoinInfo *sjinfo, List *clause)
  *
  * At the time this is called, root->join_info_list must contain entries for
  * all and only those special joins that are syntactically below this qual.
+ *
+ * 下推.
  */
 static void
 distribute_qual_to_rels(PlannerInfo *root, Node *clause,
