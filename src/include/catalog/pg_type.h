@@ -56,6 +56,8 @@ CATALOG(pg_type,1247,TypeRelationId) BKI_BOOTSTRAP BKI_ROWTYPE_OID(71,TypeRelati
 	int16		typlen BKI_ARRAY_DEFAULT(-1);
 
 	/*
+	 * 这个字段表示, 这个是否用 reference 访问.
+	 *
 	 * typbyval determines whether internal Postgres routines pass a value of
 	 * this type by value or by reference.  typbyval had better be false if
 	 * the length is not 1, 2, or 4 (or 8 on 8-byte-Datum machines).

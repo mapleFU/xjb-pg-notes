@@ -17,6 +17,7 @@
 
 /*
  * Attribute numbers for the system-defined attributes
+ * 一些预定义的 column. 被称作 system-defined attributes.
  */
 #define SelfItemPointerAttributeNumber			(-1)
 #define MinTransactionIdAttributeNumber			(-2)

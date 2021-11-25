@@ -399,6 +399,8 @@ heap_attisnull(HeapTuple tup, int attnum, TupleDesc tupleDesc)
 /* ----------------
  *		nocachegetattr
  *
+ *		没有 cache 的时候做 fallback.
+ *
  *		This only gets called from fastgetattr() macro, in cases where
  *		we can't use a cacheoffset and the value is not null.
  *
@@ -441,6 +443,7 @@ nocachegetattr(HeapTuple tuple,
 
 	attnum--;
 
+  // 根据 null 来设置 slow.
 	if (!HeapTupleNoNulls(tuple))
 	{
 		/*
@@ -472,6 +475,7 @@ nocachegetattr(HeapTuple tuple,
 
 	tp = (char *) tup + tup->t_hoff;
 
+  // 根据变长再设置 slow
 	if (!slow)
 	{
 		Form_pg_attribute att;
@@ -488,6 +492,8 @@ nocachegetattr(HeapTuple tuple,
 		 * Otherwise, check for non-fixed-length attrs up to and including
 		 * target.  If there aren't any, it's safe to cheaply initialize the
 		 * cached offsets for these attrs.
+		 *
+		 * 有 VarWidths(变长) 的话, 这里会标注在 header 上.
 		 */
 		if (HeapTupleHasVarWidth(tuple))
 		{
@@ -527,6 +533,7 @@ nocachegetattr(HeapTuple tuple,
 		off = TupleDescAttr(tupleDesc, j - 1)->attcacheoff +
 			TupleDescAttr(tupleDesc, j - 1)->attlen;
 
+    // 肯定没有变长字段.
 		for (; j < natts; j++)
 		{
 			Form_pg_attribute att = TupleDescAttr(tupleDesc, j);
@@ -621,6 +628,8 @@ nocachegetattr(HeapTuple tuple,
  *
  * This is a support routine for the heap_getattr macro.  The macro
  * has already determined that the attnum refers to a system attribute.
+ *
+ * 从 HeapTuple 里面读一些系统定义的属性.
  * ----------------
  */
 Datum

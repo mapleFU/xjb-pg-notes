@@ -49,6 +49,8 @@ CATALOG(pg_attribute,1249,AttributeRelationId) BKI_BOOTSTRAP BKI_ROWTYPE_OID(75,
 	 * since the pg_type entry may no longer exist; but we rely on attlen,
 	 * attbyval, and attalign to still tell us how large the values in the
 	 * table are.
+	 *
+	 * 对应的 attribute oid.
 	 */
 	Oid			atttypid BKI_LOOKUP_OPT(pg_type);
 
@@ -108,6 +110,8 @@ CATALOG(pg_attribute,1249,AttributeRelationId) BKI_BOOTSTRAP BKI_ROWTYPE_OID(75,
 	/*
 	 * attbyval is a copy of the typbyval field from pg_type for this
 	 * attribute.  See atttypid comments above.
+	 *
+	 * 直接用值表示
 	 */
 	bool		attbyval;
 
