@@ -28,6 +28,9 @@ typedef MinimalTupleData *MinimalTuple;
 
 
 /*
+ * Tuple 在内存中的格式. 可能指向存储引擎上 fetch 的数据, 也可以是自己 allocate 出来的数据.
+ * t_data 是标志它的字段.
+ *
  * HeapTupleData is an in-memory data structure that points to a tuple.
  *
  * There are several ways in which this data structure is used:

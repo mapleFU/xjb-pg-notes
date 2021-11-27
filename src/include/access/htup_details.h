@@ -149,6 +149,7 @@ typedef struct DatumTupleFields
 	 */
 } DatumTupleFields;
 
+//! 具体的 Tuple Header, 最后有一个 null 的 VLA.
 struct HeapTupleHeaderData
 {
 	union
@@ -174,6 +175,7 @@ struct HeapTupleHeaderData
 	/* ^ - 23 bytes - ^ */
 
 #define FIELDNO_HEAPTUPLEHEADERDATA_BITS 5
+  // 对应的 NullBitSet
 	bits8		t_bits[FLEXIBLE_ARRAY_MEMBER];	/* bitmap of NULLs */
 
 	/* MORE DATA FOLLOWS AT END OF STRUCT */
@@ -708,6 +710,18 @@ struct MinimalTupleData
 
 #if !defined(DISABLE_COMPLEX_MACRO)
 
+//! attnum > 1, 才表示去 fetch 用户定义的列.
+//! tup 是一个 HeapTuple.
+//!
+//! HeapTupleNoNulls 从 header 里面看看有没有 Null 字段的定义.
+//! 没有这个 flagmask, 甚至不用处理这些内容, 舒服.
+//!
+//! 没有 Null 的时候, 如果 attcacheoff (attnum - 1 对应的) 找到了, 那么直接调用 fetchatt:
+//! * fetchatt(属性, offset)
+//!
+//! * 有 Null 的话, 先访问 null, 如果有就返回 `(Datum)NULL`.
+//!
+//! 上述情况都不存在, 就走 fallback 到 `noncachegetattr`.
 #define fastgetattr(tup, attnum, tupleDesc, isnull)					\
 (																	\
 	AssertMacro((attnum) > 0),										\
@@ -745,6 +759,8 @@ extern Datum fastgetattr(HeapTuple tup, int attnum, TupleDesc tupleDesc,
 
 /* ----------------
  *		heap_getattr
+ *
+ *		获取属性的入口, 参数是 HeapTuple, 第几列, Schema, 是否是 null(输出)
  *
  *		Extract an attribute of a heap tuple and return it as a Datum.
  *		This works for either system or user attributes.  The given attnum

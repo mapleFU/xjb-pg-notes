@@ -37,6 +37,8 @@
  * attributes; otherwise, only 1, 2, and 4-byte values are supported.
  *
  * Note that T must already be properly aligned for this to work correctly.
+ *
+ * A 是 tupleDesc.
  */
 #define fetchatt(A,T) fetch_att(T, (A)->attbyval, (A)->attlen)
 
@@ -45,6 +47,8 @@
  */
 #if SIZEOF_DATUM == 8
 
+//! 如果 attlen == sizeof(Datum), 返回一个内存 Datum.
+//! 否则, get i32/i16
 #define fetch_att(T,attbyval,attlen) \
 ( \
 	(attbyval) ? \

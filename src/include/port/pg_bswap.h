@@ -129,6 +129,8 @@ pg_bswap64(uint64 x)
 
 
 /*
+ * Datum 的内容.
+ *
  * Rearrange the bytes of a Datum from big-endian order into the native byte
  * order.  On big-endian machines, this does nothing at all.  Note that the C
  * type Datum is an unsigned integer type on all platforms.
