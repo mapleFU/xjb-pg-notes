@@ -588,6 +588,8 @@ ExecGetUpdateNewTuple(ResultRelInfo *relinfo,
  *		This may change the currently active tuple conversion map in
  *		mtstate->mt_transition_capture, so the callers must take care to
  *		save the previous value to avoid losing track of it.
+ *
+ *		插入相关的逻辑.
  * ----------------------------------------------------------------
  */
 static TupleTableSlot *
@@ -930,12 +932,16 @@ ExecInsert(ModifyTableState *mtstate,
 		}
 		else
 		{
+			/** 插入对应的 table 和对应的 index **/
+
 			/* insert the tuple normally */
 			table_tuple_insert(resultRelationDesc, slot,
 							   estate->es_output_cid,
 							   0, NULL);
 
 			/* insert index entries for tuple */
+			// btr 和 tuple 采取不同的 pattern 来并发, 
+			//  这个地方 del 没有更新 index tuples.
 			if (resultRelInfo->ri_NumIndices > 0)
 				recheckIndexes = ExecInsertIndexTuples(resultRelInfo,
 													   slot, estate, false,

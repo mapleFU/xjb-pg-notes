@@ -178,6 +178,7 @@ btree_xlog_insert(bool isleaf, bool ismeta, bool posting,
 	 */
 	if (!isleaf)
 		_bt_clear_incomplete_split(record, 1);
+	// 这个地方 redo 每个 Log 对应一个 Page.
 	if (XLogReadBufferForRedo(record, 0, &buffer) == BLK_NEEDS_REDO)
 	{
 		Size		datalen;
@@ -1009,6 +1010,7 @@ btree_xlog_reuse_page(XLogReaderState *record)
 												   xlrec->node);
 }
 
+// 重放 btree 的日志.
 void
 btree_redo(XLogReaderState *record)
 {

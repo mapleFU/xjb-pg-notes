@@ -90,6 +90,8 @@ static BTVacuumPosting btreevacuumposting(BTVacState *vstate,
 /*
  * Btree handler function: return IndexAmRoutine with access method parameters
  * and callbacks.
+ *
+ * 绑定对应的 handler.
  */
 Datum
 bthandler(PG_FUNCTION_ARGS)

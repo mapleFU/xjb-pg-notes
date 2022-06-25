@@ -14,6 +14,9 @@ Proceedings of 1986 Fall Joint Computer Conference, pp 380-389).
 The basic Lehman & Yao Algorithm
 --------------------------------
 
+B-link Tree 给每个 Page 添加了一个 right-link 和对应的 high key, 这允许检测到并发
+ 的 Page Split, 允许不以 Tree 级别的 Read Lock 来读.
+
 Compared to a classic B-tree, L&Y adds a right-link pointer to each page,
 to the page's right sibling.  It also adds a "high key" to each page, which
 is an upper bound on the keys that are allowed on that page.  These two
@@ -21,12 +24,21 @@ additions make it possible detect a concurrent page split, which allows the
 tree to be searched without holding any read locks (except to keep a single
 page from being modified while reading it).
 
+当跟着下降下来的时候, 这里会比较 Page 的 high key 和 下来的search key 比较, 如果
+ search key 比 high key 高, 说明 Btree 发生了 split, 这个时候会走 right-link,
+ 直到搜索到合适的范围.
+
 When a search follows a downlink to a child page, it compares the page's
 high key with the search key.  If the search key is greater than the high
 key, the page must've been split concurrently, and you must follow the
 right-link to find the new page containing the key range you're looking
 for.  This might need to be repeated, if the page has been split more than
 once.
+
+"downlink" 的分界是 "separator" keys, 而不是 tuple. 这在 PG 里面用语是 pivot tuple.
+ 在 pg 里面, 叶节点的 Page 内容 指向 HeapTuple(叶节点 high key 除外), 
+ 而 pivot tuple 指向叶节点或者下层节点. pivot 可能包含 key + downlink, 只有 key,
+ 只有 downlink(属性被 truncate 了, 我没懂, 看看后面).
 
 Lehman and Yao talk about alternating "separator" keys and downlinks in
 internal pages rather than tuples or records.  We use the term "pivot"
@@ -39,6 +51,9 @@ some time ago.  A pivot tuple may contain a "separator" key and downlink,
 just a separator key (i.e. the downlink value is implicitly undefined), or
 just a downlink (i.e. all attributes are truncated away).
 
+Btree Keys 需要是 unique 的, 由于 MVCC, 这里感觉需要 TID 作为 tiebreaker 属性,
+ 非叶子结点的 key 是 unique 的, 叶子结点可能会有 high key == last key 的情况.
+
 The requirement that all btree keys be unique is satisfied by treating heap
 TID as a tiebreaker attribute.  Logical duplicates are sorted in heap TID
 order.  This is necessary because Lehman and Yao also require that the key
@@ -47,6 +62,8 @@ the adjacent keys in the parent page (Ki must be _strictly_ less than v,
 which is assured by having reliably unique keys).  Keys are always unique
 on their level, with the exception of a leaf page's high key, which can be
 fully equal to the last item on the page.
+
+PG 还实现了 suffix truncation.
 
 The Postgres implementation of suffix truncation must make sure that the
 Lehman and Yao invariants hold, and represents that absent/truncated
@@ -60,12 +77,19 @@ Differences to the Lehman & Yao algorithm
 We have made the following changes in order to incorporate the L&Y algorithm
 into Postgres:
 
+L&Y 算法假设 pages 拷贝是不共享的, PG 肯定是共享的. 所以需要内存的 Log 和 Pin 系统.
+
 Lehman and Yao don't require read locks, but assume that in-memory
 copies of tree pages are unshared.  Postgres shares in-memory buffers
 among backends.  As a result, we do page-level read locking on btree
 pages in order to guarantee that no record is modified while we are
 examining it.  This reduces concurrency but guarantees correct
 behavior.
+
+这里支持顺序 scan( 看代码还有 next-key 的接口), delete, lookup, insert.
+ 顺序 scan 的话, 需要释放本侧锁 -> moveright 即可(ARIES/IM 应该会 crabbing),
+ 这里还要支持 backward scan, 所以 leaf page 需要 left-key, 然后需要先拿到左侧锁,
+ 再占自己的锁, 看看中间有没有被改掉.
 
 We support the notion of an ordered "scan" of an index as well as
 insertions, deletions, and simple lookups.  A scan in the forward
@@ -85,6 +109,16 @@ move right until we find a page whose right-link matches the page we
 came from.  (Actually, it's even harder than that; see page deletion
 discussion below.)
 
+Page 的读锁只有在 scanning page 的时候需要, 这里会尽快把 TID 拷贝出来, 避免占用临界区太长.
+ 这里还需要 Pin Page, 来防止 Deletion(Deletion 需要一个 Super-Exclusive Lock, 保证没 pin).
+ 这个状态叫做 stopped "between" pages, heap tuple id 可以在这个时候处理, 来避免删除.
+ Scan 的时候 boundary 不会改变, 因此, 逻辑上是没问题的.
+
+为了避免 aba 问题, scan 的时候要保存 right-link, 否则, 如果出现 Page-Split, 这个可能会做一些
+ re-scan 之类的行为.
+
+对于 move-left, 这个时候会实时读取 left-link, 然后有一些特殊算法来操作.
+
 Page read locks are held only for as long as a scan is examining a page.
 To minimize lock/unlock traffic, an index scan always searches a leaf page
 to identify all the matching items at once, copying their heap tuple IDs
@@ -92,16 +126,18 @@ into backend-local storage.  The heap tuple IDs are then processed while
 not holding any page lock within the index.  We do continue to hold a pin
 on the leaf page in some circumstances, to protect against concurrent
 deletions (see below).  In this state the scan is effectively stopped
-"between" pages, either before or after the page it has pinned.  This is
+"between" pages, either before or after the page it has pinned.  **This is
 safe in the presence of concurrent insertions and even page splits, because
 items are never moved across pre-existing page boundaries --- so the scan
 cannot miss any items it should have seen, nor accidentally return the same
-item twice.  The scan must remember the page's right-link at the time it
+item twice**.  The scan must remember the page's right-link at the time it
 was scanned, since that is the page to move right to; if we move right to
 the current right-link then we'd re-scan any items moved by a page split.
 We don't similarly remember the left-link, since it's best to use the most
 up-to-date left-link when trying to move left (see detailed move-left
 algorithm below).
+
+在大部分情况下, 在拿到下一个 Page 之前, 这里会移除
 
 In most cases we release our lock and pin on a page before attempting
 to acquire pin and lock on the page we are moving to.  In a few places
@@ -122,6 +158,8 @@ that's been moved into the right sibling even if they read the meta-data
 page before it got updated.  This is the same reasoning that makes a
 split of a non-root page safe.  The locking considerations are similar too.
 
+考虑根节点 split 的特殊场景:
+
 When an inserter recurses up the tree, splitting internal pages to insert
 links to pages inserted on the level below, it is possible that it will
 need to access a page above the level that was the root when it began its
@@ -135,6 +173,11 @@ root, but in principle there could have been more than one root split
 since we saw the root.  We can identify the correct tree level by means of
 the level numbers stored in each page.  The situation is rare enough that
 we do not need a more efficient solution.)
+
+L&Y 的协议里面, crabbing 和 moveright 是会拿 Latch 的, 这样可能父-子-right都有 lock.
+ 在 moveright 的时候, 可以释放掉之前的锁, 因为 "there is never any
+ need to deal with the case where the separator key that we must relocate
+ becomes the original parent's high key". 看来下降的时候, 这里会带锁.
 
 Lehman and Yao must couple/chain locks as part of moving right when
 relocating a child page's downlink during an ascent of the tree.  This is
@@ -155,6 +198,9 @@ more than one write lock at a time during its ascent".  We more or less
 stick with Lehman and Yao's approach of conservatively coupling parent and
 child locks when ascending the tree, since it's far simpler.
 
+L&Y 算法假设 key 是定长的, 但生产数据库铁变长, 这里需要 split 的时候, 按照 bytes 
+ 分成相似的长度.
+
 Lehman and Yao assume fixed-size keys, but we must deal with
 variable-size keys.  Therefore there is not a fixed maximum number of
 keys per page; we just stuff in as many as will fit.  When we split a
@@ -165,6 +211,8 @@ that the incoming item doesn't fit on the split page where it needs to go!
 
 Deleting index tuples during VACUUM
 -----------------------------------
+
+
 
 Before deleting a leaf item, we get a super-exclusive lock on the target
 page, so that no other backend has a pin on the page when the deletion

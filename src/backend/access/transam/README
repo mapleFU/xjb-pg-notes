@@ -399,10 +399,16 @@ clog.c.  pg_subtrans is contained completely in subtrans.c.
 Write-Ahead Log Coding
 ----------------------
 
+WAL subsystem 在代码中也被叫做 xlog, 用于保证 crash recovery 的安全性. 它
+ 也能用于支持 PITR (point-in-time recovery) 和基于 log shipping 的热备.
+
 The WAL subsystem (also called XLOG in the code) exists to guarantee crash
 recovery.  It can also be used to provide point-in-time recovery, as well as
 hot-standby replication via log shipping.  Here are some notes about
 non-obvious aspects of its design.
+
+这里, 每个 Page 都有一个 LSN, bufmgr 在写入之前, 会保证 Page LSN 对应的内容被
+ flush 了。
 
 A basic assumption of a write AHEAD log is that log entries must reach stable
 storage before the data-page changes they describe.  This ensures that

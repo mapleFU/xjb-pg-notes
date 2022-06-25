@@ -2072,6 +2072,8 @@ _bt_split(Relation rel, BTScanInsert itup_key, Buffer buf, Buffer cbuf,
  *			root, or during concurrent root split, where we can be inefficient
  * isroot - we split the true root
  * isonly - we split a page alone on its level (might have been fast root)
+ *
+ * 把 buf 和 rbuf 合并(isonly 做一些特殊标示). 获取父节点, 上锁, 插入.
  */
 static void
 _bt_insert_parent(Relation rel,
@@ -2100,7 +2102,10 @@ _bt_insert_parent(Relation rel,
 
 		Assert(stack == NULL);
 		Assert(isonly);
-		/* create a new root node and update the metapage */
+		/* 
+		create a new root node and update the metapage 
+		
+		*/
 		rootbuf = _bt_newroot(rel, buf, rbuf);
 		/* release the split buffers */
 		_bt_relbuf(rel, rootbuf);
@@ -2227,9 +2232,13 @@ _bt_finish_split(Relation rel, Buffer lbuf, BTStack stack)
 	rpage = BufferGetPage(rbuf);
 	rpageop = (BTPageOpaque) PageGetSpecialPointer(rpage);
 
-	/* Could this be a root split? */
+	/* 
+	Could this be a root split? */
 	if (!stack)
 	{
+		// 如果 stack 是空的, 那么这里会 grab 一下 meta, 然后 check 是否是 root
+		// 因为可能是 fast_root.
+
 		Buffer		metabuf;
 		Page		metapg;
 		BTMetaPageData *metad;
@@ -2252,7 +2261,7 @@ _bt_finish_split(Relation rel, Buffer lbuf, BTStack stack)
 	elog(DEBUG1, "finishing incomplete split of %u/%u",
 		 BufferGetBlockNumber(lbuf), BufferGetBlockNumber(rbuf));
 
-	_bt_insert_parent(rel, lbuf, rbuf, stack, wasroot, wasonly);
+	_bt_insert_parent(rel, lbuf, rbuf, stack, /* 是 root */ wasroot, /* 是本层的唯二节点 */ wasonly);
 }
 
 /*

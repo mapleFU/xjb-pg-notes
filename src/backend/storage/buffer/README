@@ -3,11 +3,17 @@ src/backend/storage/buffer/README
 Notes About Shared Buffer Access Rules
 ======================================
 
+PostgreSQL 抽象出了一个 "Buffer" 系统, 表示 Page 上的内存缓存, 这套东西在 PG 的
+ 共享内存池中. 这里也要求有 Relation Level 的 Lock. 它的访问是一个二元组 (Relation, BlockID).
+
 There are two separate access control mechanisms for shared disk buffers:
 reference counts (a/k/a pin counts) and buffer content locks.  (Actually,
 there's a third level of access control: one must hold the appropriate kind
 of lock on a relation before one can legally access any page belonging to
 the relation.  Relation-level locks are not discussed here.)
+
+这里有 Pin 和 Lock. 表示内存引用, 根据 "ReadBuffer" 申请, "ReleaseBuffer" 释放.
+ 访问没有 Pin 的 Page 是不安全的.
 
 Pins: one must "hold a pin on" a buffer (increment its reference count)
 before being allowed to do anything at all with it.  An unpinned buffer is
@@ -25,6 +31,9 @@ that might need to do such a wait is instead handled by waiting to obtain
 the relation-level lock, which is why you'd better hold one first.)  Pins
 may not be held across transaction boundaries, however.
 
+Lock 和 Pin 是并存的两套系统, buffer latch 有 Shared 和 Exclusive 两种类型. 
+ 根据 access flag 来指定访问谁.
+
 Buffer content locks: there are two kinds of buffer lock, shared and exclusive,
 which act just as you'd expect: multiple backends can hold shared locks on
 the same buffer, but an exclusive lock prevents anyone else from holding
@@ -36,10 +45,14 @@ the same buffer.  One must pin a buffer before trying to lock it.
 
 Buffer access rules:
 
+
+
 1. To scan a page for tuples, one must hold a pin and either shared or
 exclusive content lock.  To examine the commit status (XIDs and status bits)
 of a tuple in a shared buffer, one must likewise hold a pin and either shared
 or exclusive lock.
+
+如果找到了 Tuple, 可能会释放锁， 把 Tuple 拷贝出来. Heap Scan 就是这样的(感觉要和 Vacuum 同步).
 
 2. Once one has determined that a tuple is interesting (visible to the
 current transaction) one may drop the content lock, yet continue to access
@@ -49,6 +62,8 @@ contains a pointer to tuple data in the shared buffer.  Therefore the
 tuple cannot go away while the pin is held (see rule #5).  Its state could
 change, but that is assumed not to matter after the initial determination
 of visibility is made.
+
+需要更新 xmin/xmax 的话, 需要拿到对应的 mutex.
 
 3. To add a tuple or change the xmin/xmax fields of an existing tuple,
 one must hold a pin and an exclusive content lock on the containing buffer.

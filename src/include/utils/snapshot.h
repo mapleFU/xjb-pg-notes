@@ -19,6 +19,7 @@
 #include "lib/pairingheap.h"
 #include "storage/buf.h"
 
+// 对 PostgreSQL 的 snapshot 的包装, 访问到 MVCC 的数据.
 
 /*
  * The different snapshot types.  We use SnapshotData structures to represent
@@ -59,6 +60,8 @@ typedef enum SnapshotType
 	 *
 	 * Does _not_ include:
 	 * - in-progress transactions (as of the current instant)
+	 *
+	 * 感觉其实有点类似 RC.
 	 * -------------------------------------------------------------------------
 	 */
 	SNAPSHOT_SELF,
@@ -164,6 +167,8 @@ typedef struct SnapshotData
 	 * it contains *committed* transactions between xmin and xmax.
 	 *
 	 * note: all ids in xip[] satisfy xmin <= xip[i] < xmax
+	 *
+	 * 正在运行的事务 ID 的列表
 	 */
 	TransactionId *xip;
 	uint32		xcnt;			/* # of xact ids in xip[] */
@@ -176,6 +181,8 @@ typedef struct SnapshotData
 	 *
 	 * note: all ids in subxip[] are >= xmin, but we don't bother filtering
 	 * out any that are >= xmax
+	 *
+	 * 子事务活跃列表.
 	 */
 	TransactionId *subxip;
 	int32		subxcnt;		/* # of xact ids in subxip[] */

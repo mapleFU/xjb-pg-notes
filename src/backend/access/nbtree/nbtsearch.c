@@ -98,13 +98,14 @@ _bt_drop_lock_and_maybe_pin(IndexScanDesc scan, BTScanPos sp)
  * during the search will be finished.
  */
 BTStack
-_bt_search(Relation rel, BTScanInsert key, Buffer *bufP, int access,
+_bt_search(Relation rel, BTScanInsert key, Buffer *bufP, /* 给读还是给写 */ int access,
 		   Snapshot snapshot)
 {
 	BTStack		stack_in = NULL;
 	int			page_access = BT_READ;
 
 	/* Get the root page to start with */
+	// 允许 fastroot, 拿到 root 和对应的锁.
 	*bufP = _bt_getroot(rel, access);
 
 	/* If index is empty and access = BT_READ, no root page is created. */
@@ -133,6 +134,12 @@ _bt_search(Relation rel, BTScanInsert key, Buffer *bufP, int access,
 		 * any of the upper levels (internal pages with incomplete splits are
 		 * also taken care of in _bt_getstackbuf).  But this is a good
 		 * opportunity to finish splits of internal pages too.
+		 *
+		 * 在写入阶段, _bt_moveright 可以完成一次合并, bufP 最初指向 Root 节点, 后来是某个下降
+		 * 的时候最左侧的内容. 这里好像在 fast_root 的时候, stack 是空的(这个时候里面会
+		 * grab 父级的锁)
+		 * 
+		 * _bt_moveright 本身会释放锁再移动.
 		 */
 		*bufP = _bt_moveright(rel, key, *bufP, (access == BT_WRITE), stack_in,
 							  page_access, snapshot);
@@ -158,6 +165,8 @@ _bt_search(Relation rel, BTScanInsert key, Buffer *bufP, int access,
 		 * stack entry for this page/level.  If caller ends up splitting a
 		 * page one level down, it usually ends up inserting a new pivot
 		 * tuple/downlink immediately after the location recorded here.
+		 *
+		 * stack 加入这一层
 		 */
 		new_stack = (BTStack) palloc(sizeof(BTStackData));
 		new_stack->bts_blkno = BufferGetBlockNumber(*bufP);
@@ -168,11 +177,16 @@ _bt_search(Relation rel, BTScanInsert key, Buffer *bufP, int access,
 		 * Page level 1 is lowest non-leaf page level prior to leaves.  So, if
 		 * we're on the level 1 and asked to lock leaf page in write mode,
 		 * then lock next page in write mode, because it must be a leaf.
+		 *
+		 * 叶子节点才切成写锁.
 		 */
 		if (opaque->btpo_level == 1 && access == BT_WRITE)
 			page_access = BT_WRITE;
 
-		/* drop the read lock on the page, then acquire one on its child */
+		/* 
+		drop the read lock on the page, then acquire one on its child 
+		bufP 切到子节点, 释放掉 bufP 上的锁.
+		*/
 		*bufP = _bt_relandgetbuf(rel, *bufP, child, page_access);
 
 		/* okay, all set to move down a level */
@@ -183,6 +197,8 @@ _bt_search(Relation rel, BTScanInsert key, Buffer *bufP, int access,
 	 * If we're asked to lock leaf in write mode, but didn't manage to, then
 	 * relock.  This should only happen when the root page is a leaf page (and
 	 * the only page in the index other than the metapage).
+	 *
+	 * 叶节点处理是否 split, 传递下去.
 	 */
 	if (access == BT_WRITE && page_access == BT_READ)
 	{
@@ -194,6 +210,8 @@ _bt_search(Relation rel, BTScanInsert key, Buffer *bufP, int access,
 		 * Race -- the leaf page may have split after we dropped the read lock
 		 * but before we acquired a write lock.  If it has, we may need to
 		 * move right to its new sibling.  Do that.
+		 * 
+		 * 再次检查 split.
 		 */
 		*bufP = _bt_moveright(rel, key, *bufP, true, stack_in, BT_WRITE,
 							  snapshot);
@@ -211,6 +229,8 @@ _bt_search(Relation rel, BTScanInsert key, Buffer *bufP, int access,
  * data that appeared on the page originally is either on the page
  * or strictly to the right of it.
  *
+ * Page 保证向右分裂. 这里要决定是否 moveright.
+ *
  * This routine decides whether or not we need to move right in the
  * tree by examining the high key entry on the page.  If that entry is
  * strictly less than the scankey, or <= the scankey in the
@@ -219,6 +239,8 @@ _bt_search(Relation rel, BTScanInsert key, Buffer *bufP, int access,
  *
  * The passed insertion-type scankey can omit the rightmost column(s) of the
  * index. (see nbtree/README)
+ *
+ * 这里也要看是否搜索的是 nextkey.
  *
  * When key.nextkey is false (the usual case), we are looking for the first
  * item >= key.  When key.nextkey is true, we are looking for the first item
@@ -275,23 +297,31 @@ _bt_moveright(Relation rel,
 		TestForOldSnapshot(snapshot, rel, page);
 		opaque = (BTPageOpaque) PageGetSpecialPointer(page);
 
+		// 如果已经是 rightmost 了, 就不用 move 了.
 		if (P_RIGHTMOST(opaque))
 			break;
 
 		/*
 		 * Finish any incomplete splits we encounter along the way.
+		 *
+		 * 如果是写, 这里会有 `incomplete_split`, 这个地方, 父级上一定有对应的锁,
+		 *  所以可以 finish split.
 		 */
 		if (forupdate && P_INCOMPLETE_SPLIT(opaque))
 		{
 			BlockNumber blkno = BufferGetBlockNumber(buf);
 
 			/* upgrade our lock if necessary */
+			/* 如果是 BT_READ, 那么, 因为要完成这个操作, 所以要切成写锁
+				TODO(mwish): 不过, 这个地方什么时候会产生这个度 + BT_READ 呢?
+			 */
 			if (access == BT_READ)
 			{
 				_bt_unlockbuf(rel, buf);
 				_bt_lockbuf(rel, buf, BT_WRITE);
 			}
 
+			// 因为切了 lock, 所以可能要重新切换视图, 这个地方应该是 stack 有父节点.
 			if (P_INCOMPLETE_SPLIT(opaque))
 				_bt_finish_split(rel, buf, stack);
 			else
@@ -304,7 +334,8 @@ _bt_moveright(Relation rel,
 
 		if (P_IGNORE(opaque) || _bt_compare(rel, key, page, P_HIKEY) >= cmpval)
 		{
-			/* step right one page */
+			/* 
+			step right one page */
 			buf = _bt_relandgetbuf(rel, buf, opaque->btpo_next, access);
 			continue;
 		}

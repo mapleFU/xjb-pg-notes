@@ -327,6 +327,8 @@ _bt_set_cleanup_info(Relation rel, BlockNumber num_delpages)
  *		NOTE that the returned root page will have only a read lock set
  *		on it even if access = BT_WRITE!
  *
+ *		这个地方 fastroot 会下降到应该下降的层, 然后有个最左侧的地方.
+ *
  *		The returned page is not necessarily the true root --- it could be
  *		a "fast root" (a page that is alone in its level due to deletions).
  *		Also, if the root page is split while we are "in flight" to it,
@@ -336,8 +338,13 @@ _bt_set_cleanup_info(Relation rel, BlockNumber num_delpages)
  *		insist on finding the true root.  We do, however, guarantee to
  *		return a live (not deleted or half-dead) page.
  *
+ *		如果成功返回了, root page (逻辑的) 会被 Pin + Read-locked, MetaPage 的锁操作
+ *		 在这个函数内会全部操作完.
+ *
  *		On successful return, the root page is pinned and read-locked.
  *		The metadata page is not locked or pinned on exit.
+ *
+ * 		拿到 Page 的 Root, 有可能是 fastroot. 如果不希望的话, 走 fastroot.
  */
 Buffer
 _bt_getroot(Relation rel, int access)
@@ -789,6 +796,8 @@ _bt_metaversion(Relation rel, bool *heapkeyspace, bool *allequalimage)
 
 /*
  *	_bt_checkpage() -- Verify that a freshly-read page looks sane.
+ *
+ *  报错, 发现了问题.
  */
 void
 _bt_checkpage(Relation rel, Buffer buf)
