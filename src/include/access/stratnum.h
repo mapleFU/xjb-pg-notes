@@ -25,6 +25,8 @@ typedef uint16 StrategyNumber;
 
 /*
  * Strategy numbers for B-tree indexes.
+ *
+ * Btree 搜索的 op: LT, LE, EQ, GE, GT.
  */
 #define BTLessStrategyNumber			1
 #define BTLessEqualStrategyNumber		2

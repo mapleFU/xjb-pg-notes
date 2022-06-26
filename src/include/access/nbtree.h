@@ -806,7 +806,7 @@ typedef BTStackData *BTStack;
  * using a scankey built from a leaf page's high key.  Most callers set this
  * to false.
  *
- * 
+ * scantid 是当插入 heapkeyspace 索引的时候, 才会考虑的.
  *
  * scantid is the heap TID that is used as a final tiebreaker attribute.  It
  * is set to NULL when index scan doesn't need to find a position for a
