@@ -74,6 +74,8 @@ static inline int _bt_blk_cmp(const void *arg1, const void *arg2);
 
 /*
  *	_bt_doinsert() -- Handle insertion of a single index tuple in the tree.
+ *	上层插入的函数.
+ *	
  *
  *		This routine is called by the public interface routine, btinsert.
  *		By here, itup is filled in, including the TID.

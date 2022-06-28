@@ -63,7 +63,7 @@ which is assured by having reliably unique keys).  Keys are always unique
 on their level, with the exception of a leaf page's high key, which can be
 fully equal to the last item on the page.
 
-PG 还实现了 suffix truncation.
+PG 还实现了 suffix truncation. 实际上类似某几个 key 如果不存在, 那么被视作 -inf.
 
 The Postgres implementation of suffix truncation must make sure that the
 Lehman and Yao invariants hold, and represents that absent/truncated
@@ -86,10 +86,12 @@ pages in order to guarantee that no record is modified while we are
 examining it.  This reduces concurrency but guarantees correct
 behavior.
 
-这里支持顺序 scan( 看代码还有 next-key 的接口), delete, lookup, insert.
+这里支持顺序 scan( 看代码还有 next-key 的接口, 例如 _bt_first, _bt_next), 
+ lookup(_bt_search), delete(一般是批量删除), insert(_bt_search_i..).
  顺序 scan 的话, 需要释放本侧锁 -> moveright 即可(ARIES/IM 应该会 crabbing),
  这里还要支持 backward scan, 所以 leaf page 需要 left-key, 然后需要先拿到左侧锁,
- 再占自己的锁, 看看中间有没有被改掉.
+ 再占自己的锁, 看看中间有没有被改掉. 为了支持反向的 scan, 这里还支持拿到页面的
+ left-link.
 
 We support the notion of an ordered "scan" of an index as well as
 insertions, deletions, and simple lookups.  A scan in the forward
@@ -137,13 +139,18 @@ We don't similarly remember the left-link, since it's best to use the most
 up-to-date left-link when trying to move left (see detailed move-left
 algorithm below).
 
-在大部分情况下, 在拿到下一个 Page 之前, 这里会移除
+在大部分情况下, 在拿到下一个 Page 之前, 这里会移除本页面的 pin/lock. 在一些特殊场景,
+ 这里会在 lock 下一个页面的时候, 同时持有本页面的锁.
 
 In most cases we release our lock and pin on a page before attempting
 to acquire pin and lock on the page we are moving to.  In a few places
 it is necessary to lock the next page before releasing the current one.
 This is safe when moving right or up, but not when moving left or down
 (else we'd create the possibility of deadlocks).
+
+考虑根节点 split 的特殊场景, 这里的实现是 Root 也会分裂成右节点. 然后这里会构造一个
+ 新的根结点, 持有分裂的两个子节点. 然后新的根结点也需要更改 MetaPage, 来让它对用户最终
+ 可见. 到 Root 节点上也要靠不断的 moveright 来处理.
 
 Lehman and Yao fail to discuss what must happen when the root page
 becomes full and must be split.  Our implementation is to split the
@@ -158,7 +165,11 @@ that's been moved into the right sibling even if they read the meta-data
 page before it got updated.  This is the same reasoning that makes a
 split of a non-root page safe.  The locking considerations are similar too.
 
-考虑根节点 split 的特殊场景:
+当有递归分裂(插入子链接之后需要分裂)的时候, 显然, 这会访问父节点. 父节点如果分裂然后更新了
+ 搜索向下的 STACK 就是错的, 如果出现这个问题, 这里需要重新下降, 包括 fetch MetaPage 和
+ fetch root. 这里可以通过 level 之类的来做快速验证.
+
+ TODO(mwish): 好像没看到下降的时候重新下降的.
 
 When an inserter recurses up the tree, splitting internal pages to insert
 links to pages inserted on the level below, it is possible that it will
@@ -177,7 +188,7 @@ we do not need a more efficient solution.)
 L&Y 的协议里面, crabbing 和 moveright 是会拿 Latch 的, 这样可能父-子-right都有 lock.
  在 moveright 的时候, 可以释放掉之前的锁, 因为 "there is never any
  need to deal with the case where the separator key that we must relocate
- becomes the original parent's high key". 看来下降的时候, 这里会带锁.
+ becomes the original parent's high key". 看来下降的时候, 这里不会带锁.
 
 Lehman and Yao must couple/chain locks as part of moving right when
 relocating a child page's downlink during an ascent of the tree.  This is
@@ -212,7 +223,11 @@ that the incoming item doesn't fit on the split page where it needs to go!
 Deleting index tuples during VACUUM
 -----------------------------------
 
-
+这里只有 vacuum 阶段会在索引中做批量的删除(rollback 呢?), 这个地方会有 Pin + Lock, 然后任何一个
+ 上层的删除肯定都来源于叶子结点的删除. 这里 PG 记录被删除, 可能会被 reuse, 所以会需要保护 Delete
+ 和 indexscan 没有并发. 不过, 这里只要保证非 MVCC 的 Scan 不会有问题, 当使用 MVCC Scan 的时候,
+ 上层的机制会保证这里没有问题, indexscan 看不到同一个 tid 上的对应的记录. 所以, MVCC Scan 不会
+ 保留对应的记录. 现有的实现中, 如果是 index-only scan 或者没写 wal, 也需要这些.
 
 Before deleting a leaf item, we get a super-exclusive lock on the target
 page, so that no other backend has a pin on the page when the deletion
@@ -220,9 +235,9 @@ starts.  This is not necessary for correctness in terms of the btree index
 operations themselves; as explained above, index scans logically stop
 "between" pages and so can't lose their place.  The reason we do it is to
 provide an interlock between VACUUM and indexscans.  Since VACUUM deletes
-index entries before reclaiming heap tuple line pointers, the
+index entries before reclaiming heap tuple line pointers, *the
 super-exclusive lock guarantees that VACUUM can't reclaim for re-use a
-line pointer that an indexscanning process might be about to visit.  This
+line pointer that an indexscanning process might be about to visit*.  This
 guarantee works only for simple indexscans that visit the heap in sync
 with the index scan, not for bitmap scans.  We only need the guarantee
 when using non-MVCC snapshot rules; when using an MVCC snapshot, it
@@ -235,6 +250,10 @@ index is not WAL-logged or if the scan is an index-only scan.  If later
 work allows the pin to be dropped for all cases we will be able to
 simplify the vacuum code, since the concept of a super-exclusive lock
 for btree indexes will no longer be needed.
+
+Pin 不一定被持有, 同时, split 只要持有写锁, 所以 scan 可能返回不再存在于 Page 上且
+ 存在于 Page 右侧的内容(或者 Page 新插入的内容). 如果 index 遇到被删掉的数据, 他可以报错.
+ 这个地方有个好玩的问题是说, btr 会缓存拿到的 rightlink, 然后分裂也没啥关系.
 
 Because a pin is not always held, and a page can be split even while
 someone does hold a pin on it, it is possible that an indexscan will
@@ -253,6 +272,9 @@ requirement does not say that btbulkdelete must visit the pages in any
 particular order.  (See also simple deletion and bottom-up deletion,
 below.)
 
+中间非叶子结点没有这个问题, 因为遍历过的节点不会有问题. 因为下降的时候会持有叶子结点的锁.
+TODO(mwish): 还是没太看懂.
+
 There is no such interlocking for deletion of items in internal pages,
 since backends keep no lock nor pin on a page they have descended past.
 Hence, when a backend is ascending the tree using its stack, it must
@@ -264,6 +286,13 @@ parent item does still exist and can't have been deleted.
 
 VACUUM's linear scan, concurrent page splits
 --------------------------------------------
+
+VACUUM 根据 Linear Scan 来扫描可以删除的 tid, 同时考虑能不能删掉 empty page.
+ 这里指的是所有记录, 而不是 MVCC 视图和树什么的, 比如从 page0, ... page100.
+
+这个实现会导致 page50 split 到 page2, 然后 page2 这个序号已经略过了. 这里会有一个
+ vacuum cycle ID 策略, 在 btbulkdelete 开始后, 如果这个 page 已经分裂过, 那么它就会
+ 找到那个分裂出的叶子, 递归处理 right-link
 
 VACUUM accesses the index by doing a linear scan to search for deletable
 TIDs, while considering the possibility of deleting empty pages in
@@ -293,6 +322,9 @@ counter value stored on each index page.
 Deleting entire pages during VACUUM
 -----------------------------------
 
+PG 只有 Page 完全空白的时候, 才会删掉 Page. 这个地方不会做 Page Merge. 同时, 这里不会删掉最右侧的页面.
+ 而中间的节点更难删除, 只有删整个子树的时候才能删除.
+
 We consider deleting an entire page from the btree only when it's become
 completely empty of items.  (Merging partly-full pages would allow better
 space reuse, but it seems impractical to move existing data items left or
@@ -301,9 +333,18 @@ might miss the items if so.)  Also, we *never* delete the rightmost page
 on a tree level (this restriction simplifies the traversal algorithms, as
 explained below).  Page deletion always begins from an empty leaf page.  An
 internal page can only be deleted as part of deleting an entire subtree.
+
+典型场景: 删除的时候只有一个叶子、一堆根节点了.
+
 This is always a "skinny" subtree consisting of a "chain" of internal pages
 plus a single leaf page.  There is one page on each level of the subtree,
 and each level/page covers the same key space.
+
+删除叶子分为两阶段(B-link tree 有关论文中, 没有 left 节点的话, 数据可以移动到左侧):
+1. Page 从父节点 unlink, 标记成 half-dead. 父亲的查找需要从根节点下降查找. downlink 需要指向
+ rightsibling, 移除原本的 downlink. 因为没有 low-key, 所以两边都不需要更新 high-key. 同时,
+ 被标记为 half-dead 的页面, 会被查询 bypass. 这个时候类似一个 split 的阶段的逻辑.
+2. 锁左中右, 然后删除.
 
 Deleting a leaf page is a two-stage process.  In the first stage, the page
 is unlinked from its parent, and marked as half-dead.  The parent page must
@@ -318,6 +359,8 @@ target page as half-dead, which causes any subsequent searches to ignore it
 and move right (or left, in a backwards scan).  This leaves the tree in a
 similar state as during a page split: the page has no downlink pointing to
 it, but it's still linked to its siblings.
+
+(下面是 part1 的正确性证明)
 
 (Note: Lanin and Shasha prefer to make the key space move left, but their
 argument for doing so hinges on not having left-links, which we have
@@ -341,6 +384,9 @@ In the second-stage, the half-dead leaf page is unlinked from its siblings.
 We first lock the left sibling (if any) of the target, the target page
 itself, and its right sibling (there must be one) in that order.  Then we
 update the side-links in the siblings, and mark the target page deleted.
+
+递归删除: 如果父节点空了, 那么递归向上找到没空的父节点, 然后把 downlink 删了, 留下一组
+ 全都应该清除的子结构.
 
 When we're about to delete the last remaining child of a parent page, things
 are slightly more complicated.  In the first stage, we leave the immediate
@@ -391,6 +437,8 @@ when and how deleted pages become safe for VACUUM to make recyclable.
 Page deletion and backwards scans
 ---------------------------------
 
+算法: 先左移, 再尽量尝试右移, 直到右侧是对应的范围.
+
 Moving left in a backward scan is complicated because we must consider
 the possibility that the left sibling was just split (meaning we must find
 the rightmost page derived from the left sibling), plus the possibility
@@ -422,6 +470,8 @@ we need to be sure we don't miss or re-scan any items.
 
 Page deletion and tree height
 -----------------------------
+
+树高度不可能下降.
 
 Because we never delete the rightmost page of any level (and in particular
 never delete the root), it's impossible for the height of the tree to
@@ -503,6 +553,8 @@ the new right sibling page).
 
 Fastpath For Index Insertion
 ----------------------------
+
+缓存最右侧的节点, 便于插入.
 
 We optimize for a common case of insertion of increasing index key
 values by caching the last page to which this backend inserted the last

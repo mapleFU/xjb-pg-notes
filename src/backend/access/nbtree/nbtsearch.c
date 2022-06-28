@@ -1446,6 +1446,7 @@ _bt_first(IndexScanDesc scan, ScanDirection dir)
 		return false;
 	}
 	else
+		// 对 Page 上对应的谓词锁, 只有 SSI 有效.
 		PredicateLockPage(rel, BufferGetBlockNumber(buf),
 						  scan->xs_snapshot);
 
