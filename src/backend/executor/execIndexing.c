@@ -269,6 +269,8 @@ ExecCloseIndices(ResultRelInfo *resultRelInfo)
  *		true.  (When 'update' is false we already know not to pass
  *		the hint to any index.)
  *
+ *      Update 是看是否引起 hot 等逻辑来处理的.
+ *
  *		Unique and exclusion constraints are enforced at the same
  *		time.  This returns a list of index OIDs for any unique or
  *		exclusion constraints that are deferred and that had

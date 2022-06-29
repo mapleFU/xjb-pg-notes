@@ -1,6 +1,9 @@
 Locking tuples
 --------------
 
+这里 LockTuple 实现成了一个 2级 机制, XMAX 本身要么标记一个 txn_id, 要么是无效的 txn,
+ 由 infomask 来识别. 当多个 trxn 锁定一个 tuple 的时候, 这里会有 MultiXact 机制.
+
 Locking tuples is not as easy as locking tables or other database objects.
 The problem is that transactions might want to lock large numbers of tuples at
 any one time, so it's not possible to keep the locks objects in shared memory.
@@ -11,6 +14,10 @@ setting additional infomask bits to distinguish this case from the more normal
 case of having deleted the tuple.  When multiple transactions concurrently
 lock a tuple, a MultiXact is used; see below.  This mechanism can accommodate
 arbitrarily large numbers of tuples being locked simultaneously.
+
+有的时候需要等待 tuple-lock 释放, 所以有 XactLockTableWait 或者 MultiXactIdWait,
+ 因为共享锁定之类的原因, 可能这个 wait 的时候会有 starvatation, 所以这里引入了 2级机制.
+ 先上重锁, 然后等待现有的锁释放, 标记, 然后退出.
 
 When it is necessary to wait for a tuple-level lock to be released, the basic
 delay is provided by XactLockTableWait or MultiXactIdWait on the contents of
@@ -27,6 +34,8 @@ protocol for waiting for a tuple-level lock is really
      XactLockTableWait()
      mark tuple as locked by me
      UnlockTuple()
+
+多个 waiter 等同一个 tuple, 同一时间只会有一个 Tuple 的 lock.
 
 When there are multiple waiters, arbitration of who is to get the lock next
 is provided by LockTuple().  However, at most one tuple-level lock will

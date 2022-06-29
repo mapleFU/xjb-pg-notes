@@ -30,6 +30,8 @@
  * of attributes; that is because we don't have room to store the number of
  * attributes in the header.  Given the MAXALIGN constraint there's no space
  * savings to be had anyway, for usual values of INDEX_MAX_KEYS.
+ *
+ * 这里好像没有 MVCC 的信息?
  */
 
 typedef struct IndexTupleData

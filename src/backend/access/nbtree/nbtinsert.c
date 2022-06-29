@@ -74,6 +74,8 @@ static inline int _bt_blk_cmp(const void *arg1, const void *arg2);
 
 /*
  *	_bt_doinsert() -- Handle insertion of a single index tuple in the tree.
+ *	上层插入的函数.
+ *	
  *
  *		This routine is called by the public interface routine, btinsert.
  *		By here, itup is filled in, including the TID.
@@ -317,6 +319,7 @@ _bt_search_insert(Relation rel, BTInsertState insertstate)
 	Assert(!insertstate->bounds_valid);
 	Assert(insertstate->postingoff == 0);
 
+	// 查看能否 fastpath.
 	if (RelationGetTargetBlock(rel) != InvalidBlockNumber)
 	{
 		/* Simulate a _bt_getbuf() call with conditional locking */
@@ -815,7 +818,7 @@ static OffsetNumber
 _bt_findinsertloc(Relation rel,
 				  BTInsertState insertstate,
 				  bool checkingunique,
-				  bool indexUnchanged,
+				  /* 仅改变映射 */ bool indexUnchanged,
 				  BTStack stack,
 				  Relation heapRel)
 {
@@ -1297,7 +1300,9 @@ _bt_insertonpg(Relation rel,
 
 			xlrec.offnum = newitemoff;
 
+			// 标记插入的元素.
 			XLogBeginInsert();
+			// 标记插入的记录.
 			XLogRegisterData((char *) &xlrec, SizeOfBtreeInsert);
 
 			if (isleaf && postingoff == 0)
@@ -1345,6 +1350,7 @@ _bt_insertonpg(Relation rel,
 			if (postingoff == 0)
 			{
 				/* Just log itup from caller */
+				// 记录物理插入的 ibuf
 				XLogRegisterBufData(0, (char *) itup, IndexTupleSize(itup));
 			}
 			else
@@ -1364,6 +1370,7 @@ _bt_insertonpg(Relation rel,
 									IndexTupleSize(origitup));
 			}
 
+			// spawn 一条逻辑日志, 给对应的流.
 			recptr = XLogInsert(RM_BTREE_ID, xlinfo);
 
 			if (BufferIsValid(metabuf))
@@ -2072,6 +2079,8 @@ _bt_split(Relation rel, BTScanInsert itup_key, Buffer buf, Buffer cbuf,
  *			root, or during concurrent root split, where we can be inefficient
  * isroot - we split the true root
  * isonly - we split a page alone on its level (might have been fast root)
+ *
+ * 把 buf 和 rbuf 合并(isonly 做一些特殊标示). 获取父节点, 上锁, 插入.
  */
 static void
 _bt_insert_parent(Relation rel,
@@ -2100,7 +2109,10 @@ _bt_insert_parent(Relation rel,
 
 		Assert(stack == NULL);
 		Assert(isonly);
-		/* create a new root node and update the metapage */
+		/* 
+		create a new root node and update the metapage 
+		
+		*/
 		rootbuf = _bt_newroot(rel, buf, rbuf);
 		/* release the split buffers */
 		_bt_relbuf(rel, rootbuf);
@@ -2149,7 +2161,10 @@ _bt_insert_parent(Relation rel,
 			_bt_relbuf(rel, pbuf);
 		}
 
-		/* get high key from left, a strict lower bound for new right page */
+		/* 
+		get high key from left, a strict lower bound for new right page 
+		left 的 high key 作为分裂键.
+		*/
 		ritem = (IndexTuple) PageGetItem(page,
 										 PageGetItemId(page, P_HIKEY));
 
@@ -2165,6 +2180,8 @@ _bt_insert_parent(Relation rel,
 		 * and recover from this, updating the stack, which ensures that the
 		 * new downlink will be inserted at the correct offset. Even buf's
 		 * parent may have changed.
+		 *
+		 * 
 		 */
 		pbuf = _bt_getstackbuf(rel, stack, bknum);
 
@@ -2227,14 +2244,21 @@ _bt_finish_split(Relation rel, Buffer lbuf, BTStack stack)
 	rpage = BufferGetPage(rbuf);
 	rpageop = (BTPageOpaque) PageGetSpecialPointer(rpage);
 
-	/* Could this be a root split? */
+	/* 
+	Could this be a root split? */
 	if (!stack)
 	{
+		// 如果 stack 是空的, 那么这里会 grab 一下 meta, 然后 check 是否是 root
+		// 因为可能是 fast_root.
+
 		Buffer		metabuf;
 		Page		metapg;
 		BTMetaPageData *metad;
 
-		/* acquire lock on the metapage */
+		/* 
+		acquire lock on the metapage 
+		原则上, 这个地方可能引入 IO?
+		*/
 		metabuf = _bt_getbuf(rel, BTREE_METAPAGE, BT_WRITE);
 		metapg = BufferGetPage(metabuf);
 		metad = BTPageGetMeta(metapg);
@@ -2252,12 +2276,14 @@ _bt_finish_split(Relation rel, Buffer lbuf, BTStack stack)
 	elog(DEBUG1, "finishing incomplete split of %u/%u",
 		 BufferGetBlockNumber(lbuf), BufferGetBlockNumber(rbuf));
 
-	_bt_insert_parent(rel, lbuf, rbuf, stack, wasroot, wasonly);
+	_bt_insert_parent(rel, lbuf, rbuf, stack, /* 是 root */ wasroot, /* 是本层的唯二节点 */ wasonly);
 }
 
 /*
  *	_bt_getstackbuf() -- Walk back up the tree one step, and find the pivot
  *						 tuple whose downlink points to child page.
+ *
+ *  从 stack 上的父亲查找.
  *
  *		Caller passes child's block number, which is used to identify
  *		associated pivot tuple in parent page using a linear search that
@@ -2301,10 +2327,12 @@ _bt_getstackbuf(Relation rel, BTStack stack, BlockNumber child)
 		Page		page;
 		BTPageOpaque opaque;
 
+		// 拿到父级别的 Page, 占有写锁
 		buf = _bt_getbuf(rel, blkno, BT_WRITE);
 		page = BufferGetPage(buf);
 		opaque = (BTPageOpaque) PageGetSpecialPointer(page);
 
+		// (递归的) 完成 incomplete split.
 		if (P_INCOMPLETE_SPLIT(opaque))
 		{
 			_bt_finish_split(rel, buf, stack->bts_parent);
@@ -2349,6 +2377,7 @@ _bt_getstackbuf(Relation rel, BTStack stack, BlockNumber child)
 				itemid = PageGetItemId(page, offnum);
 				item = (IndexTuple) PageGetItem(page, itemid);
 
+				// 找到父亲是它的.
 				if (BTreeTupleGetDownLink(item) == child)
 				{
 					/* Return accurate pointer to where link is now */
@@ -2358,6 +2387,7 @@ _bt_getstackbuf(Relation rel, BTStack stack, BlockNumber child)
 				}
 			}
 
+			// 在之前的区域查找.
 			for (offnum = OffsetNumberPrev(start);
 				 offnum >= minoff;
 				 offnum = OffsetNumberPrev(offnum))
@@ -2623,6 +2653,8 @@ _bt_pgaddtup(Page page,
 
 /*
  * _bt_delete_or_dedup_one_page - Try to avoid a leaf page split.
+ *
+ * 避免 Leaf Split, 去 check 一下 Item 是不是 dead 了, 要不要把 LP_DEAD 的记录清除.
  *
  * There are three operations performed here: simple index deletion, bottom-up
  * index deletion, and deduplication.  If all three operations fail to free

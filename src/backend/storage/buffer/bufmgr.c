@@ -1614,6 +1614,8 @@ MarkBufferDirty(Buffer buffer)
  * Note: it is OK to pass buffer == InvalidBuffer, indicating that no old
  * buffer actually needs to be released.  This case is the same as ReadBuffer,
  * but can save some tests in the caller.
+ *
+ * Buffer 相关的读取, 内容会走到 Buffer 上.
  */
 Buffer
 ReleaseAndReadBuffer(Buffer buffer,

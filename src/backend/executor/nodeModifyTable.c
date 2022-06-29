@@ -588,6 +588,8 @@ ExecGetUpdateNewTuple(ResultRelInfo *relinfo,
  *		This may change the currently active tuple conversion map in
  *		mtstate->mt_transition_capture, so the callers must take care to
  *		save the previous value to avoid losing track of it.
+ *
+ *		插入相关的逻辑.
  * ----------------------------------------------------------------
  */
 static TupleTableSlot *
@@ -930,12 +932,16 @@ ExecInsert(ModifyTableState *mtstate,
 		}
 		else
 		{
+			/** 插入对应的 table 和对应的 index **/
+
 			/* insert the tuple normally */
 			table_tuple_insert(resultRelationDesc, slot,
 							   estate->es_output_cid,
 							   0, NULL);
 
 			/* insert index entries for tuple */
+			// btr 和 tuple 采取不同的 pattern 来并发, 
+			//  这个地方 del 没有更新 index tuples.
 			if (resultRelInfo->ri_NumIndices > 0)
 				recheckIndexes = ExecInsertIndexTuples(resultRelInfo,
 													   slot, estate, false,
@@ -1573,6 +1579,8 @@ ExecCrossPartitionUpdate(ModifyTableState *mtstate,
 /* ----------------------------------------------------------------
  *		ExecUpdate
  *
+ *		因为 MVCC, ExecUpdate 只会被实现为 insert.
+ *
  *		note: we can't run UPDATE queries with transactions
  *		off because UPDATEs are actually INSERTs and our
  *		scan will mistakenly loop forever, updating the tuple
@@ -1600,7 +1608,7 @@ ExecCrossPartitionUpdate(ModifyTableState *mtstate,
 static TupleTableSlot *
 ExecUpdate(ModifyTableState *mtstate,
 		   ResultRelInfo *resultRelInfo,
-		   ItemPointer tupleid,
+		   /* 更新对应的 Tuple, 可能为 NULL, 表示没有旧值 */ ItemPointer tupleid,
 		   HeapTuple oldtuple,
 		   TupleTableSlot *slot,
 		   TupleTableSlot *planSlot,
@@ -1783,6 +1791,8 @@ lreplace:;
 		 * can't-serialize error if not. This is a special-case behavior
 		 * needed for referential integrity updates in transaction-snapshot
 		 * mode transactions.
+		 *
+		 * 对 HeapTuple 进行更新.
 		 */
 		result = table_tuple_update(resultRelationDesc, tupleid, slot,
 									estate->es_output_cid,
@@ -1791,6 +1801,7 @@ lreplace:;
 									true /* wait for commit */ ,
 									&tmfd, &lockmode, &update_indexes);
 
+		// 处理并发冲突.
 		switch (result)
 		{
 			case TM_SelfModified:
@@ -1832,6 +1843,8 @@ lreplace:;
 
 			case TM_Updated:
 				{
+					// 如果有更新, 要决定怎么处理这些记录.
+
 					TupleTableSlot *inputslot;
 					TupleTableSlot *epqslot;
 					TupleTableSlot *oldSlot;
@@ -1931,7 +1944,10 @@ lreplace:;
 				return NULL;
 		}
 
-		/* insert index entries for tuple if necessary */
+		/* 
+		insert index entries for tuple if necessary 
+		更新对应的 IndexTuples
+		*/
 		if (resultRelInfo->ri_NumIndices > 0 && update_indexes)
 			recheckIndexes = ExecInsertIndexTuples(resultRelInfo,
 												   slot, estate, true, false,

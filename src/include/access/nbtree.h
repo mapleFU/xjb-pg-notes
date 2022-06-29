@@ -29,6 +29,9 @@
 typedef uint16 BTCycleId;
 
 /*
+ *  在 Page 的尾部, 存储 Page 的 left 和 right 的兄弟节点和 btree 的 level,
+ *   page 的 type. Vacuum 本身也会占有锁.
+ *
  *	BTPageOpaqueData -- At the end of every page, we store a pointer
  *	to both siblings in the tree.  This is used to do forward/backward
  *	index scans.  The next-page link is also critical for recovery when
@@ -61,9 +64,13 @@ typedef uint16 BTCycleId;
 
 typedef struct BTPageOpaqueData
 {
+	/** 两个兄弟 **/
+
 	BlockNumber btpo_prev;		/* left sibling, or P_NONE if leftmost */
 	BlockNumber btpo_next;		/* right sibling, or P_NONE if rightmost */
+	// 本 tree 的深度
 	uint32		btpo_level;		/* tree level --- zero for leaf pages */
+	// 下面几行就介绍这些 flags 了
 	uint16		btpo_flags;		/* flag bits, see below */
 	BTCycleId	btpo_cycleid;	/* vacuum cycle ID of latest split */
 } BTPageOpaqueData;
@@ -96,17 +103,26 @@ typedef BTPageOpaqueData *BTPageOpaque;
  * Its primary purpose is to point to the location of the btree root page.
  * We also point to the "fast" root, which is the current effective root;
  * see README for discussion.
+ *
+ * MetaPageData 指向
  */
 
 typedef struct BTMetaPageData
 {
+	// 一些标志位
 	uint32		btm_magic;		/* should contain BTREE_MAGIC */
 	uint32		btm_version;	/* nbtree version (always <= BTREE_VERSION) */
+	
+	// 真实的 root
 	BlockNumber btm_root;		/* current root location */
 	uint32		btm_level;		/* tree level of the root page */
+	
+	// Fastroot 相关的内容
 	BlockNumber btm_fastroot;	/* current "fast" root location */
 	uint32		btm_fastlevel;	/* tree level of the "fast" root page */
 	/* remaining fields only valid when btm_version >= BTREE_NOVAC_VERSION */
+
+	// 一些 vacuum 有关的标记.
 
 	/* number of deleted, non-recyclable pages during last cleanup */
 	uint32		btm_last_cleanup_num_delpages;
@@ -180,6 +196,8 @@ typedef struct BTMetaPageData
  * heap TIDs must have to fill the space between the page header and
  * special area).  The value is slightly higher (i.e. more conservative)
  * than necessary as a result, which is considered acceptable.
+ *
+ * 每个 Page 逻辑上最大的 TID 数量.
  */
 #define MaxTIDsPerBTreePage \
 	(int) ((BLCKSZ - SizeOfPageHeaderData - sizeof(BTPageOpaqueData)) / \
@@ -213,6 +231,8 @@ typedef struct BTMetaPageData
 /*
  * Macros to test whether a page is leftmost or rightmost on its tree level,
  * as well as other state info kept in the opaque data.
+ *
+ * leftmost 和 rightmost
  */
 #define P_LEFTMOST(opaque)		((opaque)->btpo_prev == P_NONE)
 #define P_RIGHTMOST(opaque)		((opaque)->btpo_next == P_NONE)
@@ -221,6 +241,7 @@ typedef struct BTMetaPageData
 #define P_ISDELETED(opaque)		(((opaque)->btpo_flags & BTP_DELETED) != 0)
 #define P_ISMETA(opaque)		(((opaque)->btpo_flags & BTP_META) != 0)
 #define P_ISHALFDEAD(opaque)	(((opaque)->btpo_flags & BTP_HALF_DEAD) != 0)
+// Page 的状态是 Deleted 或者 Half Dead, 需要 ignore, 可能需要 moveright.
 #define P_IGNORE(opaque)		(((opaque)->btpo_flags & (BTP_DELETED|BTP_HALF_DEAD)) != 0)
 #define P_HAS_GARBAGE(opaque)	(((opaque)->btpo_flags & BTP_HAS_GARBAGE) != 0)
 #define P_INCOMPLETE_SPLIT(opaque)	(((opaque)->btpo_flags & BTP_INCOMPLETE_SPLIT) != 0)
@@ -228,6 +249,8 @@ typedef struct BTMetaPageData
 
 /*
  * BTDeletedPageData is the page contents of a deleted page
+ *
+ * Delete 有关会有一个这个数据.
  */
 typedef struct BTDeletedPageData
 {
@@ -250,7 +273,11 @@ BTPageSetDeleted(Page page, FullTransactionId safexid)
 		sizeof(BTDeletedPageData);
 	header->pd_upper = header->pd_special;
 
-	/* Set safexid in deleted page */
+	/* 
+	Set safexid in deleted page 
+
+	Tuple 标记为 Deleted
+	*/
 	contents = ((BTDeletedPageData *) PageGetContents(page));
 	contents->safexid = safexid;
 }
@@ -369,6 +396,8 @@ typedef struct BTVacState
 #define P_FIRSTDATAKEY(opaque)	(P_RIGHTMOST(opaque) ? P_HIKEY : P_FIRSTKEY)
 
 /*
+ * Index 本身好像有一个 IndexTuple, 应该是 IndexManager 查询的结果, 作为 leaf 的 tuple
+ *
  * Notes on B-Tree tuple format, and key and non-key attributes:
  *
  * INCLUDE B-Tree indexes have non-key attributes.  These are extra
@@ -385,6 +414,9 @@ typedef struct BTVacState
  *
  * t_tid points to the heap TID, which is a tiebreaker key column as of
  * BTREE_VERSION 4.
+ *
+ * t_tid + t_info 应该是 IndexTuple 的内容, 后面有一些附带的额外内容. key values 是
+ *  Btree 对应的 Key 的内容(TODO: include columns 是什么...).
  *
  * Non-pivot tuples complement pivot tuples, which only have key columns.
  * The sole purpose of pivot tuples is to represent how the key space is
@@ -721,6 +753,9 @@ BTreeTupleGetMaxHeapTID(IndexTuple itup)
  * splits.  Our private stack can become stale due to concurrent page
  * splits and page deletions, but it should never give us an irredeemably
  * bad picture.
+ *
+ * 下降的 Btree 的 Stack, 需要找到上层来递归的插入. bts_parent 相当于每层的父亲节点.
+ *  这里被实现为一个单链表的形式.
  */
 typedef struct BTStackData
 {
@@ -737,6 +772,8 @@ typedef BTStackData *BTStack;
  * scankey" (not to be confused with a search scankey).  It's used to descend
  * a B-Tree using _bt_search.
  *
+ * _bt_search 的中间结构, insert/scan 下降的时候都会走到这里.
+ *
  * heapkeyspace indicates if we expect all keys in the index to be physically
  * unique because heap TID is used as a tiebreaker attribute, and if index may
  * have truncated key attributes in pivot tuples.  This is actually a property
@@ -744,8 +781,12 @@ typedef BTStackData *BTStack;
  * indexes whose version is >= version 4.  It's convenient to keep this close
  * by, rather than accessing the metapage repeatedly.
  *
+ * `heapkeyspace` 表示 key 都是独立的(MVCC 呢)?
+ *
  * allequalimage is set to indicate that deduplication is safe for the index.
  * This is also a property of the index relation rather than an indexscan.
+ *
+ * `allequalimage` ?
  *
  * anynullkeys indicates if any of the keys had NULL value when scankey was
  * built from index tuple (note that already-truncated tuple key attributes
@@ -760,9 +801,13 @@ typedef BTStackData *BTStack;
  * locate the first item >= scankey.  When nextkey is true, they will locate
  * the first item > scan key.
  *
+ * nextkey 在查询里定位, 看看要不要走到下一个.
+ *
  * pivotsearch is set to true by callers that want to re-find a leaf page
  * using a scankey built from a leaf page's high key.  Most callers set this
  * to false.
+ *
+ * scantid 是当插入 heapkeyspace 索引的时候, 才会考虑的.
  *
  * scantid is the heap TID that is used as a final tiebreaker attribute.  It
  * is set to NULL when index scan doesn't need to find a position for a
@@ -784,6 +829,7 @@ typedef struct BTScanInsertData
 	bool		heapkeyspace;
 	bool		allequalimage;
 	bool		anynullkeys;
+	// 是否查找的是下一个 key.
 	bool		nextkey;
 	bool		pivotsearch;
 	ItemPointer scantid;		/* tiebreaker for scankeys */
@@ -808,6 +854,8 @@ typedef struct BTInsertStateData
 {
 	IndexTuple	itup;			/* Item we're inserting */
 	Size		itemsz;			/* Size of itup -- should be MAXALIGN()'d */
+
+	// Scan 下降到的位置.
 	BTScanInsert itup_key;		/* Insertion scankey */
 
 	/* Buffer containing leaf page we're likely to insert itup on */
@@ -835,6 +883,8 @@ typedef BTInsertStateData *BTInsertState;
 /*
  * State used to representing an individual pending tuple during
  * deduplication.
+ *
+ * 一些 duplication 的状态判断.
  */
 typedef struct BTDedupInterval
 {

@@ -2532,6 +2532,8 @@ SampleHeapTupleVisible(TableScanDesc scan, Buffer buffer,
 
 /* ------------------------------------------------------------------------
  * Definition of the heap table access method.
+ *
+ * Heap 对应的 Handler.
  * ------------------------------------------------------------------------
  */
 

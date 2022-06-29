@@ -45,6 +45,8 @@
 
 /*
  * All that we need to regenerate the meta-data page
+ *
+ * 重新生成 meta-data page 的日志, 感觉基本上相当于一个全量快照.
  */
 typedef struct xl_btree_metadata
 {
@@ -75,6 +77,8 @@ typedef struct xl_btree_metadata
  * both, since it must do an in-place update of the existing posting list
  * that was split as an extra step.  Also, recovery generates a "final"
  * newitem.  See _bt_swap_posting() for details on posting list splits.
+ *
+ * 
  */
 typedef struct xl_btree_insert
 {

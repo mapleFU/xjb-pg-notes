@@ -98,13 +98,14 @@ _bt_drop_lock_and_maybe_pin(IndexScanDesc scan, BTScanPos sp)
  * during the search will be finished.
  */
 BTStack
-_bt_search(Relation rel, BTScanInsert key, Buffer *bufP, int access,
+_bt_search(Relation rel, BTScanInsert key, Buffer *bufP, /* 给读还是给写 */ int access,
 		   Snapshot snapshot)
 {
 	BTStack		stack_in = NULL;
 	int			page_access = BT_READ;
 
 	/* Get the root page to start with */
+	// 允许 fastroot, 拿到 root 和对应的锁.
 	*bufP = _bt_getroot(rel, access);
 
 	/* If index is empty and access = BT_READ, no root page is created. */
@@ -133,6 +134,12 @@ _bt_search(Relation rel, BTScanInsert key, Buffer *bufP, int access,
 		 * any of the upper levels (internal pages with incomplete splits are
 		 * also taken care of in _bt_getstackbuf).  But this is a good
 		 * opportunity to finish splits of internal pages too.
+		 *
+		 * 在写入阶段, _bt_moveright 可以完成一次合并, bufP 最初指向 Root 节点, 后来是某个下降
+		 * 的时候最左侧的内容. 这里好像在 fast_root 的时候, stack 是空的(这个时候里面会
+		 * grab 父级的锁)
+		 * 
+		 * _bt_moveright 本身会释放锁再移动.
 		 */
 		*bufP = _bt_moveright(rel, key, *bufP, (access == BT_WRITE), stack_in,
 							  page_access, snapshot);
@@ -158,6 +165,8 @@ _bt_search(Relation rel, BTScanInsert key, Buffer *bufP, int access,
 		 * stack entry for this page/level.  If caller ends up splitting a
 		 * page one level down, it usually ends up inserting a new pivot
 		 * tuple/downlink immediately after the location recorded here.
+		 *
+		 * stack 加入这一层
 		 */
 		new_stack = (BTStack) palloc(sizeof(BTStackData));
 		new_stack->bts_blkno = BufferGetBlockNumber(*bufP);
@@ -168,11 +177,16 @@ _bt_search(Relation rel, BTScanInsert key, Buffer *bufP, int access,
 		 * Page level 1 is lowest non-leaf page level prior to leaves.  So, if
 		 * we're on the level 1 and asked to lock leaf page in write mode,
 		 * then lock next page in write mode, because it must be a leaf.
+		 *
+		 * 叶子节点才切成写锁.
 		 */
 		if (opaque->btpo_level == 1 && access == BT_WRITE)
 			page_access = BT_WRITE;
 
-		/* drop the read lock on the page, then acquire one on its child */
+		/* 
+		drop the read lock on the page, then acquire one on its child 
+		bufP 切到子节点, 释放掉 bufP 上的锁.
+		*/
 		*bufP = _bt_relandgetbuf(rel, *bufP, child, page_access);
 
 		/* okay, all set to move down a level */
@@ -183,6 +197,8 @@ _bt_search(Relation rel, BTScanInsert key, Buffer *bufP, int access,
 	 * If we're asked to lock leaf in write mode, but didn't manage to, then
 	 * relock.  This should only happen when the root page is a leaf page (and
 	 * the only page in the index other than the metapage).
+	 *
+	 * 叶节点处理是否 split, 传递下去.
 	 */
 	if (access == BT_WRITE && page_access == BT_READ)
 	{
@@ -194,6 +210,8 @@ _bt_search(Relation rel, BTScanInsert key, Buffer *bufP, int access,
 		 * Race -- the leaf page may have split after we dropped the read lock
 		 * but before we acquired a write lock.  If it has, we may need to
 		 * move right to its new sibling.  Do that.
+		 * 
+		 * 再次检查 split.
 		 */
 		*bufP = _bt_moveright(rel, key, *bufP, true, stack_in, BT_WRITE,
 							  snapshot);
@@ -211,6 +229,8 @@ _bt_search(Relation rel, BTScanInsert key, Buffer *bufP, int access,
  * data that appeared on the page originally is either on the page
  * or strictly to the right of it.
  *
+ * Page 保证向右分裂. 这里要决定是否 moveright.
+ *
  * This routine decides whether or not we need to move right in the
  * tree by examining the high key entry on the page.  If that entry is
  * strictly less than the scankey, or <= the scankey in the
@@ -219,6 +239,8 @@ _bt_search(Relation rel, BTScanInsert key, Buffer *bufP, int access,
  *
  * The passed insertion-type scankey can omit the rightmost column(s) of the
  * index. (see nbtree/README)
+ *
+ * 这里也要看是否搜索的是 nextkey.
  *
  * When key.nextkey is false (the usual case), we are looking for the first
  * item >= key.  When key.nextkey is true, we are looking for the first item
@@ -275,23 +297,32 @@ _bt_moveright(Relation rel,
 		TestForOldSnapshot(snapshot, rel, page);
 		opaque = (BTPageOpaque) PageGetSpecialPointer(page);
 
+		// 如果已经是 rightmost 了, 就不用 move 了.
 		if (P_RIGHTMOST(opaque))
 			break;
 
 		/*
 		 * Finish any incomplete splits we encounter along the way.
+		 *
+		 * 如果是写, 这里会有 `incomplete_split`, 这个地方, 父级上一定有对应的锁,
+		 *  所以可以 finish split.
 		 */
 		if (forupdate && P_INCOMPLETE_SPLIT(opaque))
 		{
 			BlockNumber blkno = BufferGetBlockNumber(buf);
 
 			/* upgrade our lock if necessary */
+			/* 如果是 BT_READ, 那么, 因为要完成这个操作, 所以要切成写锁
+				NOTE(mwish): 不过, 这个地方什么时候会产生这个度 + BT_READ 呢?
+				如果是写的下降的时候, 只有到叶子才会产生写锁, 这个地方非叶子还是 BT_READ.
+			 */
 			if (access == BT_READ)
 			{
 				_bt_unlockbuf(rel, buf);
 				_bt_lockbuf(rel, buf, BT_WRITE);
 			}
 
+			// 因为切了 lock, 所以可能要重新切换视图, 这个地方应该是 stack 有父节点.
 			if (P_INCOMPLETE_SPLIT(opaque))
 				_bt_finish_split(rel, buf, stack);
 			else
@@ -304,7 +335,8 @@ _bt_moveright(Relation rel,
 
 		if (P_IGNORE(opaque) || _bt_compare(rel, key, page, P_HIKEY) >= cmpval)
 		{
-			/* step right one page */
+			/* 
+			step right one page */
 			buf = _bt_relandgetbuf(rel, buf, opaque->btpo_next, access);
 			continue;
 		}
@@ -338,6 +370,11 @@ _bt_moveright(Relation rel,
  * This procedure is not responsible for walking right, it just examines
  * the given page.  _bt_binsrch() has no lock or refcount side effects
  * on the buffer.
+ *
+ * 直接在 slot 上二分查找. 因为 HeapPage 本身是不会变的，它们是被指向的对象, 但是 Btree
+ * 是可以改的.
+ *
+ * 这个需要和 对应 insert 的一起看.
  */
 static OffsetNumber
 _bt_binsrch(Relation rel,
@@ -388,6 +425,7 @@ _bt_binsrch(Relation rel,
 
 	cmpval = key->nextkey ? 0 : 1;	/* select comparison value */
 
+	// 二分查找, 这里找到 mid, 然后
 	while (high > low)
 	{
 		OffsetNumber mid = low + ((high - low) / 2);
@@ -401,6 +439,11 @@ _bt_binsrch(Relation rel,
 		else
 			high = mid;
 	}
+
+	/**
+	 * 
+	 * 
+	 */
 
 	/*
 	 * At this point we have high == low, but be careful: they could point
@@ -442,6 +485,7 @@ _bt_binsrch(Relation rel,
  * tuple matches (callers can use insertstate's postingoff field to
  * determine which existing heap TID will need to be replaced by a posting
  * list split).
+ *
  */
 OffsetNumber
 _bt_binsrch_insert(Relation rel, BTInsertState insertstate)
@@ -616,12 +660,16 @@ _bt_binsrch_posting(BTScanInsert key, Page page, OffsetNumber offnum)
 /*----------
  *	_bt_compare() -- Compare insertion-type scankey to tuple on a page.
  *
+ * 单个 key 的 compare, 注意, 内部的 key 可能会包含 TID.
+ *
  *	page/offnum: location of btree item to be compared to.
  *
  *		This routine returns:
  *			<0 if scankey < tuple at offnum;
  *			 0 if scankey == tuple at offnum;
  *			>0 if scankey > tuple at offnum.
+ *
+ * keys 中的 Null 也可以存在. equal
  *
  * NULLs in the keys are treated as sortable values.  Therefore
  * "equality" does not necessarily mean that the item should be returned
@@ -630,6 +678,10 @@ _bt_binsrch_posting(BTScanInsert key, Page page, OffsetNumber offnum)
  * range overlaps with their scantid.  There generally won't be a
  * matching TID in the posting tuple, which caller must handle
  * themselves (e.g., by splitting the posting list tuple).
+ *
+ * 注意, 这里 [0] 会被当作 -inf, non-leaf page 大概是
+ * -inf, 实际有意义的第一个, ...
+ * 按照上面的顺序来排列, 因为查过来的总有比所有分裂都要小的.
  *
  * CRUCIAL NOTE: on a non-leaf page, the first data key is assumed to be
  * "minus infinity": this routine will always claim it is less than the
@@ -646,6 +698,7 @@ _bt_compare(Relation rel,
 			Page page,
 			OffsetNumber offnum)
 {
+	// 拿到 Index 对应的 Desc, 然后对比 pivot.
 	TupleDesc	itupdesc = RelationGetDescr(rel);
 	BTPageOpaque opaque = (BTPageOpaque) PageGetSpecialPointer(page);
 	IndexTuple	itup;
@@ -667,9 +720,12 @@ _bt_compare(Relation rel,
 		return 1;
 
 	itup = (IndexTuple) PageGetItem(page, PageGetItemId(page, offnum));
+	// 拿到 attribute 的数量.
 	ntupatts = BTreeTupleGetNAtts(itup, rel);
 
 	/*
+	 * scan 可能只包含 index 的前 k 个 key
+	 *
 	 * The scan key is set up with the attribute number associated with each
 	 * term in the key.  It is important that, if the index is multi-key, the
 	 * scan contain the first k key attributes, and that they be in order.  If
@@ -679,11 +735,14 @@ _bt_compare(Relation rel,
 	 * We don't test for violation of this condition here, however.  The
 	 * initial setup for the index scan had better have gotten it right (see
 	 * _bt_first).
+	 *
+	 * 这里允许有少于这个数量的 cmpkey.
 	 */
 
 	ncmpkey = Min(ntupatts, key->keysz);
 	Assert(key->heapkeyspace || ncmpkey == key->keysz);
 	Assert(!BTreeTupleIsPosting(itup) || key->allequalimage);
+	// scankey 指针指向迭代位置的开头 (key->scankeys)
 	scankey = key->scankeys;
 	for (int i = 1; i <= ncmpkey; i++)
 	{
@@ -710,6 +769,8 @@ _bt_compare(Relation rel,
 		}
 		else
 		{
+			// 两边都不是 Null, 需要手动比较.
+
 			/*
 			 * The sk_func needs to be passed the index value as left arg and
 			 * the sk_argument as right arg (they might be of different
@@ -742,6 +803,8 @@ _bt_compare(Relation rel,
 	 * Note: it doesn't matter if ntupatts includes non-key attributes;
 	 * scankey won't, so explicitly excluding non-key attributes isn't
 	 * necessary.
+	 *
+	 * 如果来比较的 key 比 ntupatts 多, Page 上被视作 -inf.
 	 */
 	if (key->keysz > ntupatts)
 		return 1;
@@ -843,6 +906,8 @@ _bt_compare(Relation rel,
  * are both search-type scankeys (see nbtree/README for more about this).
  * Within this routine, we build a temporary insertion-type scankey to use
  * in locating the scan start position.
+ *
+ * 作为 btree scan 有关的接口, 找到 scan 相关的第一个.
  */
 bool
 _bt_first(IndexScanDesc scan, ScanDirection dir)
@@ -912,6 +977,9 @@ _bt_first(IndexScanDesc scan, ScanDirection dir)
 
 	/*----------
 	 * Examine the scan keys to discover where we need to start the scan.
+	 *
+	 * 这个地方在处理索引的方向和 Scan 的方向, PG 可以 ASC, DESC, ASC. 这里需要匹配到
+	 *  合适的 key.
 	 *
 	 * We want to identify the keys that can be used as starting boundaries;
 	 * these are =, >, or >= keys for a forward scan or =, <, <= keys for
@@ -1087,6 +1155,8 @@ _bt_first(IndexScanDesc scan, ScanDirection dir)
 	 * If we found no usable boundary keys, we have to start from one end of
 	 * the tree.  Walk down that edge to the first or last key, and scan from
 	 * there.
+	 *
+	 * 没找到匹配的 key, 需要从起点或者终点开始.
 	 */
 	if (keysCount == 0)
 	{
@@ -1350,6 +1420,8 @@ _bt_first(IndexScanDesc scan, ScanDirection dir)
 	/*
 	 * Use the manufactured insertion scan key to descend the tree and
 	 * position ourselves on the target leaf page.
+	 *
+	 * 用上面构造的对象来做 _bt_search
 	 */
 	stack = _bt_search(rel, &inskey, &buf, BT_READ, scan->xs_snapshot);
 
@@ -1374,6 +1446,7 @@ _bt_first(IndexScanDesc scan, ScanDirection dir)
 		return false;
 	}
 	else
+		// 对 Page 上对应的谓词锁, 只有 SSI 有效.
 		PredicateLockPage(rel, BufferGetBlockNumber(buf),
 						  scan->xs_snapshot);
 
@@ -1409,6 +1482,8 @@ _bt_first(IndexScanDesc scan, ScanDirection dir)
 
 	/*
 	 * Now load data from the first page of the scan.
+	 *
+	 * 二分查找, 读出对应的东西, 然后 unlock.
 	 */
 	if (!_bt_readpage(scan, dir, offnum))
 	{
@@ -1477,7 +1552,10 @@ _bt_next(IndexScanDesc scan, ScanDirection dir)
 		}
 	}
 
-	/* OK, itemIndex says what to return */
+	/* 
+	OK, itemIndex says what to return 
+	根据本 Page 的内容获取.
+	*/
 	currItem = &so->currPos.items[so->currPos.itemIndex];
 	scan->xs_heaptid = currItem->heapTid;
 	if (scan->xs_want_itup)
@@ -1550,6 +1628,8 @@ _bt_readpage(IndexScanDesc scan, ScanDirection dir, OffsetNumber offnum)
 	 * We save the LSN of the page as we read it, so that we know whether it
 	 * safe to apply LP_DEAD hints to the page later.  This allows us to drop
 	 * the pin for MVCC scans, which allows vacuum to avoid blocking.
+	 *
+	 * 存下对应的 LSN
 	 */
 	so->currPos.lsn = BufferGetLSNAtomic(so->currPos.buf);
 
@@ -1847,6 +1927,8 @@ _bt_savepostingitem(BTScanOpaque so, int itemIndex, OffsetNumber offnum,
 }
 
 /*
+ * 跳跃到下一个 Page.
+ *
  *	_bt_steppage() -- Step to next page containing valid data for scan
  *
  * On entry, if so->currPos.buf is valid the buffer is pinned but not locked;
@@ -2042,6 +2124,11 @@ _bt_readnextpage(IndexScanDesc scan, BlockNumber blkno, ScanDirection dir)
 		}
 
 		/*
+		 * walk left 的实际代码, 相对复杂不少, 因为要读到一致视图. 在右移的时候, 因为
+		 *  Pin 了页面, 所以没法分裂. 但左移可能看到不一致的视图.
+		 *
+		 * 这里先会持有 Page 的锁定.
+		 *
 		 * Walk left to the next page with data.  This is much more complex
 		 * than the walk-right case because of the possibility that the page
 		 * to our left splits while we are in flight to it, plus the
@@ -2171,6 +2258,9 @@ _bt_parallel_readpage(IndexScanDesc scan, BlockNumber blkno, ScanDirection dir)
  * When working on a non-leaf level, it is possible for the returned page
  * to be half-dead; the caller should check that condition and step left
  * again if it's important.
+ *
+ * 这个地方逻辑大概是这样的: 左移动的时候, 只有左侧的 view, 这个时候左侧可能分裂了, 所以要
+ *  根据视图左移一次, 然后疯狂右移.
  */
 static Buffer
 _bt_walk_left(Relation rel, Buffer buf, Snapshot snapshot)

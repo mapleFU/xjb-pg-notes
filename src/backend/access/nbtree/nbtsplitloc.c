@@ -21,7 +21,9 @@ typedef enum
 {
 	/* strategy for searching through materialized list of split points */
 	SPLIT_DEFAULT,				/* give some weight to truncation */
+	// TODO(mwish): 这是什么.
 	SPLIT_MANY_DUPLICATES,		/* find minimally distinguishing point */
+	// 向右分裂, 支持大部分分裂到右侧.
 	SPLIT_SINGLE_VALUE			/* leave left page almost full */
 } FindSplitStrat;
 

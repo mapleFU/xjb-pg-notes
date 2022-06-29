@@ -116,6 +116,7 @@ typedef struct IndexScanDescData
 	/* scan parameters */
 	Relation	heapRelation;	/* heap relation descriptor, or NULL */
 	Relation	indexRelation;	/* index relation descriptor */
+	// TODO(mwish): 这个 snapshot 会影响吗.
 	struct SnapshotData *xs_snapshot;	/* snapshot to see */
 	int			numberOfKeys;	/* number of index qualifier conditions */
 	int			numberOfOrderBys;	/* number of ordering operators */
@@ -131,6 +132,7 @@ typedef struct IndexScanDescData
 										 * tuples */
 
 	/* index access method's private state */
+	// 相关的多态的 Opaque (比如 BTScanOpaqueData)
 	void	   *opaque;			/* access-method-specific info */
 
 	/*

@@ -2055,6 +2055,8 @@ ReleaseBulkInsertStatePin(BulkInsertState bistate)
  * in particular tup->t_self receives the actual TID where the tuple was
  * stored.  But note that any toasting of fields within the tuple data is NOT
  * reflected into *tup.
+ *
+ * 插入相关的 Tuple, 同时标记对应的锁.
  */
 void
 heap_insert(Relation relation, HeapTuple tup, CommandId cid,
@@ -9428,6 +9430,7 @@ heap_xlog_confirm(XLogReaderState *record)
 		UnlockReleaseBuffer(buffer);
 }
 
+// 调用 lock, 给 tuple 上锁.
 static void
 heap_xlog_lock(XLogReaderState *record)
 {
