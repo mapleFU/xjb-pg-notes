@@ -166,6 +166,8 @@ PageIsVerifiedExtended(Page page, BlockNumber blkno, int flags)
 /*
  *	PageAddItemExtended
  *
+ *  插入元素, 允许 overwrite 或者直接插入.
+ *
  *	Add an item to a page.  Return value is the offset at which it was
  *	inserted, or InvalidOffsetNumber if the item is not inserted for any
  *	reason.  A WARNING is issued indicating the reason for the refusal.

@@ -154,6 +154,7 @@ btbuildempty(Relation index)
 	Page		metapage;
 
 	/* Construct metapage. */
+	// 内存初始化, 然后写入 newpage.
 	metapage = (Page) palloc(BLCKSZ);
 	_bt_initmetapage(metapage, P_NONE, 0, _bt_allequalimage(index, false));
 
@@ -195,7 +196,9 @@ btinsert(Relation rel, Datum *values, bool *isnull,
 	IndexTuple	itup;
 
 	/* generate an index tuple */
+	// 从用户的 values 构建 itup, 用于 insert
 	itup = index_form_tuple(RelationGetDescr(rel), values, isnull);
+	// 对应的 heap id
 	itup->t_tid = *ht_ctid;
 
 	result = _bt_doinsert(rel, itup, checkUnique, indexUnchanged, heapRel);
@@ -281,6 +284,8 @@ btgettuple(IndexScanDesc scan, ScanDirection dir)
 
 /*
  * btgetbitmap() -- gets all matching tuples, and adds them to a bitmap
+ *
+ * 给 bitmap scan 使用.
  */
 int64
 btgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
@@ -781,6 +786,8 @@ _bt_parallel_advance_array_keys(IndexScanDesc scan)
  * whether any given heap tuple (identified by ItemPointer) is being deleted.
  *
  * Result: a palloc'd struct containing statistical info for VACUUM displays.
+ *
+ * vacuum 的时候, 调用删除的接口.
  */
 IndexBulkDeleteResult *
 btbulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,

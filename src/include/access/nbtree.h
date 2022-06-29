@@ -754,7 +754,8 @@ BTreeTupleGetMaxHeapTID(IndexTuple itup)
  * splits and page deletions, but it should never give us an irredeemably
  * bad picture.
  *
- * 下降的 Btree 的 Stack, 需要找到上层来递归的插入.
+ * 下降的 Btree 的 Stack, 需要找到上层来递归的插入. bts_parent 相当于每层的父亲节点.
+ *  这里被实现为一个单链表的形式.
  */
 typedef struct BTStackData
 {

@@ -471,7 +471,8 @@ we need to be sure we don't miss or re-scan any items.
 Page deletion and tree height
 -----------------------------
 
-树高度不可能下降.
+树高度不可能下降, 因为 rightmost page 不可能被删除, 极端情况下, 会有每层一节点 + 多层
+ 的情况, 对这种情况, 引入了一个 fastroot. 当出现分裂或者删除的时候, 这里会处理 fastroot.
 
 Because we never delete the rightmost page of any level (and in particular
 never delete the root), it's impossible for the height of the tree to
@@ -501,6 +502,10 @@ sibling links undisturbed, as a tombstone that allows concurrent searches
 to detect and then recover from concurrent deletions (which are rather
 like concurrent page splits to searchers).  This design is an
 implementation of what Lanin and Shasha call "the drain technique".
+
+等待所有活跃的读 Page 的 snapshot 结束.
+
+TODO(mwish): 懒得看了
 
 We implement the technique by waiting until all active snapshots and
 registered snapshots as of the page deletion are gone; which is overly
@@ -575,6 +580,9 @@ rightmost leaf page.
 Simple deletion
 ---------------
 
+删除会标记 LP_DEAD, 一组相同 key 在 unique 索引中, 只能有一个非 LP_DEAD 的. 这个
+ 通常在插入的时候碰到冲突记录的时候标记, 也会在 indexscan 查看记录的时候做标记.
+
 If a process visits a heap tuple and finds that it's dead and removable
 (ie, dead to all open transactions, not only that process), then we can
 return to the index and mark the corresponding index entry "known dead",
@@ -586,6 +594,9 @@ there's not a convenient way to do it for bitmap scans.  Note also that
 LP_DEAD bits are often set when checking a unique index for conflicts on
 insert (this is simpler because it takes place when we hold an exclusive
 lock on the leaf page).
+
+吐过 index tuple 被标记成 LP_DEAD, 那么本质上是可以 remove 它的, 然后标记; scan
+ 只会 skip 这些记录. 这些记录实际删除是在别的阶段. 然后这个也可以 reuse 这些空间.
 
 Once an index tuple has been marked LP_DEAD it can actually be deleted
 from the index immediately; since index scans only stop "between" pages,
@@ -609,6 +620,8 @@ dead.  This isn't much of a problem in practice because LP_DEAD bits are
 just a starting point for simple deletion -- we still manage to perform
 granular deletes of posting list TIDs quite often.)
 
+这里在 index page 上操作只需要 E 锁, 因为本阶段还没有删除 heap table 的 tuple.
+
 It's sufficient to have an exclusive lock on the index page, not a
 super-exclusive lock, to do deletion of LP_DEAD items.  It might seem
 that this breaks the interlock between VACUUM and indexscans, but that is
@@ -627,6 +640,9 @@ course.)
 
 Bottom-Up deletion
 ------------------
+
+更新: 通常在 hot 没发生的时候, update 会需要做删除, 新插入的数据逻辑上是 MVCC 的下一个.
+ 这也比较好触发一些后续的逻辑.
 
 We attempt to delete whatever duplicates happen to be present on the page
 when the duplicates are suspected to be caused by version churn from
@@ -692,15 +708,22 @@ leaf pages are fairly homogeneous.
 WAL Considerations
 ------------------
 
+删除插入算法保证内存 btree 的可靠, 但不保证 crash safety. 这里依靠 Page Redo Log
+ replay. 
+
 The insertion and deletion algorithms in themselves don't guarantee btree
 consistency after a crash.  To provide robustness, we depend on WAL
 replay.  A single WAL entry is effectively an atomic action --- we can
 redo it from the log if it fails to complete.
 
+Item Insertion 和 Leaf Item Deletion 只有单条日志.
+
 Ordinary item insertions (that don't force a page split) are of course
 single WAL entries, since they only affect one page.  The same for
 leaf-item deletions (if the deletion brings the leaf page to zero items,
 it is now a candidate to be deleted, but that is a separate action).
+
+导致 Page Split 的写入包括一条 WAL, 内容是更新右兄弟的左指针, 同时也跟随一个父页插入的 WAL.
 
 An insertion that causes a page split is logged as a single WAL entry for
 the changes occurring on the insertion's level --- including update of the

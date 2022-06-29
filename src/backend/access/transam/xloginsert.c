@@ -1043,6 +1043,8 @@ XLogSaveBufferForHint(Buffer buffer, bool buffer_std)
  * If the page follows the standard page layout, with a PageHeader and unused
  * space between pd_lower and pd_upper, set 'page_std' to true. That allows
  * the unused space to be left out from the WAL record, making it smaller.
+ *
+ * 创建一个 newpage 的 wal
  */
 XLogRecPtr
 log_newpage(RelFileNode *rnode, ForkNumber forkNum, BlockNumber blkno,
